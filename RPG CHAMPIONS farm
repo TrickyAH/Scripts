@@ -1,0 +1,94 @@
+local debounce = false
+local autofarm = false -- Set to true to turn on the auto farm, false to stop it.
+
+function nc()
+    for i, v in pairs(game.Players.LocalPlayer.Character:GetChildren()) do
+        if v:IsA("BasePart") then
+            v.CanCollide = false
+            v.Velocity = Vector3.new(0, 0, 0)
+        end
+    end
+end
+
+function getClosestMob()
+    local closestDistance = math.huge
+    local closestMob
+    for _, mob in pairs(game:GetService("Workspace").Enemies:GetChildren()) do
+        if mob.Humanoid.Health > 0 and game.Players.LocalPlayer.Character:WaitForChild('Humanoid').Health > 0 then
+            local distance = (mob.HumanoidRootPart.Position - game.Players.LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+            if distance < closestDistance then
+                closestDistance = distance
+                closestMob = mob
+            end
+        end
+    end
+    return closestMob
+end
+
+local library = loadstring(game:HttpGet("https://raw.githubusercontent.com/bloodball/-back-ups-for-libs/main/Kronos"))()
+
+local window = library:Window({
+   Title = "Contact me AbduIIah#3581 to report Bugs",
+   Accent = Color3.fromRGB(69,69,207),
+   Logo = 3610245066,
+   ToggleKey = Enum.KeyCode.LeftAlt
+})
+
+local tab = window:NewTab({
+   Logo = 4483345998
+})
+
+local tabsection = tab:TabSection({
+   Title = "AbduIIah#3581"
+})
+
+local tabsection = tab:TabSection({
+   Title = "Autofarm"
+})
+
+
+local column = tabsection:AddColumn({
+   Title = "Autofarm"
+})
+
+local section = column:Section({
+   Title = "Autofarm"
+})
+
+local toggleButton = section:Toggle({
+   Text = "Auto Farm",
+   State = false,
+   Callback = function(state)
+       autofarm = state
+   end
+})
+
+task.spawn(function()
+while true do
+    task.wait()
+    if not autofarm then
+        continue
+    end
+    local target = getClosestMob()
+    if target ~= nil then
+        nc()
+        local humanoid = game.Players.LocalPlayer.Character:WaitForChild('Humanoid')
+        humanoid:MoveTo(target.HumanoidRootPart.Position)
+        wait(1)
+        game:GetService("Players").LocalPlayer.Character.WeaponEvent:FireServer('swing')
+    end
+end
+end)
+
+
+-- Disable enemies when autofarm is turned on
+local mt = getrawmetatable(game)
+local old = mt.__namecall
+setreadonly(mt, false)
+mt.__namecall = newcclosure(function(self, ...)
+    local args = {...}
+    if autofarm and getnamecallmethod() == 'InvokeServer' and self.Name == 'actionFunctions' and args[1] == "activateEnemy" then
+        args[1] = "Break Mob"
+    end
+    return old(self, unpack(args))
+end)
