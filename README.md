@@ -1,6 +1,7 @@
 ## `Game Exploits`
 
 - RPG Champions
+- Anime Catcher Simulator
 - More To Come
 
 <hr>
