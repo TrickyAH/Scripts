@@ -2,7 +2,8 @@
 
 - RPG Champions
 - Anime Catcher Simulator
-- More To Come
+- Project Mugetsu
+- Voxlblade
 
 <hr>
 
