@@ -4,6 +4,7 @@
 - Anime Catcher Simulator
 - Project Mugetsu
 - Voxlblade
+- Soul Eater Resonance
 
 <hr>
 
