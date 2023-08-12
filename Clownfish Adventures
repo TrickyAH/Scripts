@@ -1,0 +1,97 @@
+local Material = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kinlei/MaterialLua/master/Module.lua"))()
+
+local X = Material.Load({
+   Title = "Scriptifyv2", 
+   Style = 3,
+   SizeX = 500,
+   SizeY = 350,
+   Theme = "Dark",
+   ColorOverrides = {
+      MainFrame = Color3.fromRGB(44, 44, 44),
+      Header = Color3.fromRGB(30, 30, 30),
+      TextColor = Color3.fromRGB(255, 255, 255),
+      ElementColor = Color3.fromRGB(60, 60, 60)
+   }
+})
+
+local Y = X.New({
+   Title = "Game Actions"
+})
+
+local attacking = false
+local autoKicking = false
+local attackDelay = 1 -- Default attack delay in seconds
+
+local function AttackEnemies()
+   local areas = workspace.Areas:GetChildren()
+
+   local remoteAttack = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Attack")
+
+   while attacking do
+      for _, area in pairs(areas) do
+         local enemyHolder = area:FindFirstChild("EnemyHolder")
+         if enemyHolder then
+            local enemies = enemyHolder:GetChildren()
+            for _, enemy in pairs(enemies) do
+               local args = {
+                  [1] = enemy
+               }
+               remoteAttack:FireServer(unpack(args))
+            end
+         end
+      end
+      wait(attackDelay)
+   end
+end
+
+local function AutoKick()
+   local remoteKick = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Kick")
+   while autoKicking do
+      remoteKick:FireServer()
+      wait(0)
+   end
+end
+
+local KillButton = Y.Toggle({
+   Text = "Start Attacking",
+   Callback = function(Value)
+   if Value then
+      attacking = true
+      AttackEnemies()
+   else
+      attacking = false
+   end
+   end,
+   Enabled = false
+})
+
+local AttackDelaySlider = Y.Slider({
+   Text = "Attack Delay",
+   Callback = function(Value)
+   attackDelay = Value
+   end,
+   Min = 0.1, -- Minimum delay
+   Max = 5,   -- Maximum delay
+   Def = attackDelay, -- Default delay
+   Format = "%.2f seconds" -- Format the display
+})
+
+local AutoKickButton = Y.Toggle({
+   Text = "Auto Kick",
+   Callback = function(Value)
+   if Value then
+      autoKicking = true
+      AutoKick()
+   else
+      autoKicking = false
+   end
+   end,
+   Enabled = false
+})
+
+local CreditsLabel = Y.Label({
+   Text = "Made by tricky_a",
+   SizeX = 480,
+   TextSize = 18,
+   TextColor = Color3.fromRGB(200, 200, 200)
+})
