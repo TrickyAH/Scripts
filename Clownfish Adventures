@@ -1,21 +1,21 @@
 local Material = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kinlei/MaterialLua/master/Module.lua"))()
 
 local X = Material.Load({
-    Title = "Scriptifyv2", -- Set the initial title
-    Style = 3,
-    SizeX = 500,
-    SizeY = 350,
-    Theme = "Dark",
-    ColorOverrides = {
-        MainFrame = Color3.fromRGB(44, 44, 44),
-        Header = Color3.fromRGB(30, 30, 30),
-        TextColor = Color3.fromRGB(255, 255, 255),
-        ElementColor = Color3.fromRGB(60, 60, 60)
-    }
+   Title = "Scriptifyv2", -- Set the initial title
+   Style = 3,
+   SizeX = 500,
+   SizeY = 350,
+   Theme = "Dark",
+   ColorOverrides = {
+      MainFrame = Color3.fromRGB(44, 44, 44),
+      Header = Color3.fromRGB(30, 30, 30),
+      TextColor = Color3.fromRGB(255, 255, 255),
+      ElementColor = Color3.fromRGB(60, 60, 60)
+   }
 })
 
 local Y = X.New({
-    Title = "Game Actions"
+   Title = "Game Actions"
 })
 
 local attacking = false
@@ -23,130 +23,130 @@ local autoKicking = false
 local attackDelay = 1
 
 local function AttackEnemies()
-    local areas = workspace.Areas:GetChildren()
+   local areas = workspace.Areas:GetChildren()
 
-    local remoteAttack = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Attack")
+   local remoteAttack = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Attack")
 
-    while attacking do
-        for _, area in pairs(areas) do
-            local enemyHolder = area:FindFirstChild("EnemyHolder")
-            if enemyHolder then
-                local enemies = enemyHolder:GetChildren()
-                for _, enemy in pairs(enemies) do
-                    local args = {
-                        [1] = enemy
-                    }
-                    remoteAttack:FireServer(unpack(args))
-                end
+   while attacking do
+      for _, area in pairs(areas) do
+         local enemyHolder = area:FindFirstChild("EnemyHolder")
+         if enemyHolder then
+            local enemies = enemyHolder:GetChildren()
+            for _, enemy in pairs(enemies) do
+               local args = {
+                  [1] = enemy
+               }
+               remoteAttack:FireServer(unpack(args))
             end
-        end
-        wait(attackDelay)
-    end
+         end
+      end
+      wait(attackDelay)
+   end
 end
 
 local function AutoKick()
-    local remoteKick = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Kick")
-    while autoKicking do
-        remoteKick:FireServer()
-        wait(0)
-    end
+   local remoteKick = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Kick")
+   while autoKicking do
+      remoteKick:FireServer()
+      wait(0)
+   end
 end
 
 local KillButton = Y.Toggle({
-    Text = "Start Attacking",
-    Callback = function(Value)
-        if Value then
-            attacking = true
-            AttackEnemies()
-        else
-            attacking = false
-        end
-    end,
-    Enabled = false
+   Text = "Start Attacking",
+   Callback = function(Value)
+   if Value then
+      attacking = true
+      AttackEnemies()
+   else
+      attacking = false
+   end
+   end,
+   Enabled = false
 })
 
 local AttackDelaySlider = Y.Slider({
-    Text = "Attack Delay",
-    Callback = function(Value)
-        attackDelay = Value
-    end,
-    Min = 0.1,
-    Max = 5,
-    Def = attackDelay,
-    Format = "%.2f seconds"
+   Text = "Attack Delay",
+   Callback = function(Value)
+   attackDelay = Value
+   end,
+   Min = 0.1,
+   Max = 5,
+   Def = attackDelay,
+   Format = "%.2f seconds"
 })
 
 local CrateOptions = {
-    "Yellow Capsule",
-    "Black Capsule",
-    "ForceField Capsule",
-    "Gold Capsule",
-    "Green Capsule",
-    "Light Blue Capsule",
-    "Red Capsule",
-    "Teal Capsule",
-    "Ultra Black Capsule",
-    "Ultra ForceField Capsule",
-    "Ultra Gold Capsule",
-    "Ultra Green Capsule",
-    "Ultra Light Blue Capsule",
-    "Ultra Red Capsule",
-    "Ultra Teal Capsule",
-    "Ultra Wooden Capsule",
-    "Ultra Yellow Capsule",
-    "Wooden Capsule",
+   "Yellow Capsule",
+   "Black Capsule",
+   "ForceField Capsule",
+   "Gold Capsule",
+   "Green Capsule",
+   "Light Blue Capsule",
+   "Red Capsule",
+   "Teal Capsule",
+   "Ultra Black Capsule",
+   "Ultra ForceField Capsule",
+   "Ultra Gold Capsule",
+   "Ultra Green Capsule",
+   "Ultra Light Blue Capsule",
+   "Ultra Red Capsule",
+   "Ultra Teal Capsule",
+   "Ultra Wooden Capsule",
+   "Ultra Yellow Capsule",
+   "Wooden Capsule",
 }
 
 local CrateDropdown = Y.Dropdown({
-    Text = "Select Crate",
-    Callback = function(Value)
-        -- Handle selected crate option
-        selectedCrate = Value -- Store the selected crate globally
-    end,
-    Options = CrateOptions
+   Text = "Select Crate",
+   Callback = function(Value)
+   -- Handle selected crate option
+   selectedCrate = Value -- Store the selected crate globally
+   end,
+   Options = CrateOptions
 })
 
 local OpenCrateButton = Y.Button({
-    Text = "Open Crate",
-    Callback = function()
-        if selectedCrate then
-            local args = {
-                [1] = selectedCrate
-            }
-            local remoteOpenCrate = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("OpenCrate") -- Replace "OpenCrate" with the actual remote function name
-            if remoteOpenCrate then
-                remoteOpenCrate:FireServer(unpack(args))
-                print("Opening " .. selectedCrate .. " crate")
-            else
-                warn("Remote 'OpenCrate' not found")
-            end
-        end
-    end
+   Text = "Open Crate",
+   Callback = function()
+   if selectedCrate then
+      local args = {
+         [1] = selectedCrate
+      }
+      local remoteOpenCrate = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("OpenCrate") -- Replace "OpenCrate" with the actual remote function name
+      if remoteOpenCrate then
+         remoteOpenCrate:FireServer(unpack(args))
+         print("Opening " .. selectedCrate .. " crate")
+      else
+         warn("Remote 'OpenCrate' not found")
+      end
+   end
+end
 })
 
 local AutoKickButton = Y.Toggle({
-    Text = "Auto Kick",
-    Callback = function(Value)
-        if Value then
-            autoKicking = true
-            AutoKick()
-        else
-            autoKicking = false
-        end
-    end,
-    Enabled = false
+Text = "Auto Kick",
+Callback = function(Value)
+if Value then
+   autoKicking = true
+   AutoKick()
+else
+   autoKicking = false
+end
+end,
+Enabled = false
 })
 
 local CreditsLabel = Y.Label({
-    Text = "Made by tricky_a",
-    SizeX = 480,
-    TextSize = 18,
-    TextColor = Color3.fromRGB(200, 200, 200)
+Text = "Made by tricky_a",
+SizeX = 480,
+TextSize = 18,
+TextColor = Color3.fromRGB(200, 200, 200)
 })
 
 -- Update CrateDropdown options based on crates in workspace.AreaCapsules
 local function UpdateCrateOptions()
-    CrateDropdown.UpdateOptions(CrateOptions)
+CrateDropdown.UpdateOptions(CrateOptions)
 end
 
 -- Automatically update CrateDropdown options when the game starts
@@ -154,6 +154,6 @@ UpdateCrateOptions()
 
 -- Automatically update CrateDropdown options every 5 seconds
 while true do
-    wait(5)
-    UpdateCrateOptions()
+wait(5)
+UpdateCrateOptions()
 end
