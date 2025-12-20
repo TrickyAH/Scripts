@@ -26,7 +26,8 @@ local Toggles = {
     SpellSpam = false,
     AutoRepeat = false,
     AutoSummon = false,
-    AutoStart = false
+    AutoStart = false,
+    AutoReset = false
 }
 
 -- State
@@ -35,6 +36,7 @@ local currentTarget = nil
 local spinning = false
 local angle = 0
 local scriptRunning = true
+local lastWarning = false
 
 -- Setup remote events safely
 local function getRemote(name)
@@ -133,6 +135,71 @@ local function autoRepeatLoop()
     end)
 end
 
+-- Function to check if in Room 5 with no enemies
+local function checkRoom5AndReset()
+    if not Toggles.AutoReset then return end
+    
+    -- Check if Room5 exists
+    local roomInfo = workspace:FindFirstChild("roomInformation")
+    if not roomInfo then return end
+    
+    local room5 = roomInfo:FindFirstChild("Room5")
+    if not room5 then return end
+    
+    local enemiesFolder = room5:FindFirstChild("Enemies")
+    if not enemiesFolder then return end
+    
+    -- Count alive enemies in Room5 ONLY
+    local aliveCount = 0
+    for _, mob in pairs(enemiesFolder:GetChildren()) do
+        if mob:IsA("Model") then
+            local mobHum = mob:FindFirstChild("Humanoid")
+            if mobHum and mobHum.Health > 0 and mobHum:GetState() ~= Enum.HumanoidStateType.Dead then
+                if mobHum.Health > mobHum.MaxHealth * 0.01 then
+                    aliveCount = aliveCount + 1
+                end
+            end
+        end
+    end
+    
+    -- ONLY reset if we're checking Room5 folder AND it has zero alive enemies
+    -- This ensures we only reset when specifically at Room 5
+    if aliveCount == 0 and #enemiesFolder:GetChildren() > 0 then
+        -- Extra check: make sure no enemies exist in workspace.Enemies either
+        local workspaceEnemies = workspace:FindFirstChild("Enemies")
+        local hasOtherEnemies = false
+        
+        if workspaceEnemies then
+            for _, mob in pairs(workspaceEnemies:GetChildren()) do
+                if mob:IsA("Model") then
+                    local mobHum = mob:FindFirstChild("Humanoid")
+                    if mobHum and mobHum.Health > 0 then
+                        hasOtherEnemies = true
+                        break
+                    end
+                end
+            end
+        end
+        
+        -- Only reset if Room5 is clear AND no other enemies exist
+        if not hasOtherEnemies then
+            Rayfield:Notify({
+                Title = "Auto-Reset",
+                Content = "Room 5 cleared! Resetting character...",
+                Duration = 3,
+                Image = "refresh-cw"
+            })
+            
+            print("Room 5 cleared - Resetting character")
+            
+            -- Reset character
+            if char and char.Parent then
+                char:BreakJoints()
+            end
+        end
+    end
+end
+
 -- Function to find nearest alive enemy
 local function findNearestEnemy()
     local enemiesFolder = workspace:FindFirstChild("Enemies")
@@ -146,11 +213,15 @@ local function findNearestEnemy()
             local mobHum = mob:FindFirstChild("Humanoid")
             local mobHrp = mob:FindFirstChild("HumanoidRootPart")
             
-            if mobHum and mobHrp and mobHum.Health > 0 then
-                local dist = (hrp.Position - mobHrp.Position).Magnitude
-                if dist < minDist then
-                    minDist = dist
-                    nearest = mob
+            -- More thorough alive check
+            if mobHum and mobHrp and mobHum.Health > 0 and mobHum:GetState() ~= Enum.HumanoidStateType.Dead then
+                -- Skip if health is too low (likely dead but not detected)
+                if mobHum.Health > mobHum.MaxHealth * 0.01 then
+                    local dist = (hrp.Position - mobHrp.Position).Magnitude
+                    if dist < minDist then
+                        minDist = dist
+                        nearest = mob
+                    end
                 end
             end
         end
@@ -167,7 +238,16 @@ local function isTargetValid(target)
     local mobHrp = target:FindFirstChild("HumanoidRootPart")
     
     if not mobHum or not mobHrp then return false end
-    if mobHum.Health <= 0 then return false end
+    
+    -- Check both health and humanoid state
+    if mobHum.Health <= 0 or mobHum:GetState() == Enum.HumanoidStateType.Dead then 
+        return false 
+    end
+    
+    -- Extra check: if HRP is anchored and health hasn't changed, might be dead
+    if mobHrp.Anchored and mobHum.Health <= mobHum.MaxHealth * 0.01 then
+        return false
+    end
     
     return true
 end
@@ -196,6 +276,18 @@ local function spinAroundTarget(target)
             return
         end
         
+        -- Check if character and HRP still exist
+        if not char or not char.Parent then
+            if spinConnection then spinConnection:Disconnect() end
+            return
+        end
+        
+        local currentHrp = char:FindFirstChild("HumanoidRootPart")
+        if not currentHrp then
+            if spinConnection then spinConnection:Disconnect() end
+            return
+        end
+        
         angle = angle + (dt * (360 / Config.SpinSpeed))
         if angle >= 360 then angle = angle - 360 end
         
@@ -205,9 +297,9 @@ local function spinAroundTarget(target)
         
         local targetPos = mobHrp.Position + Vector3.new(offsetX, Config.HeightAbove, offsetZ)
         
-        hrp.CFrame = CFrame.new(targetPos, mobHrp.Position)
-        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        currentHrp.CFrame = CFrame.new(targetPos, mobHrp.Position)
+        currentHrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        currentHrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end)
 end
 
@@ -232,7 +324,14 @@ local function mainLoop()
                             currentTarget = findNearestEnemy()
                             
                             if currentTarget then
+                                print("New target found:", currentTarget.Name)
+                                lastWarning = false
                                 spinAroundTarget(currentTarget)
+                            else
+                                if not lastWarning then
+                                    print("No enemies found, waiting...")
+                                    lastWarning = true
+                                end
                             end
                         end
                     end
@@ -267,7 +366,7 @@ end)
 
 -- Create Rayfield Window
 local Window = Rayfield:CreateWindow({
-    Name = "Dungeon Auto-Farm",
+    Name = "Dungeon Auto-Farm (TP)",
     LoadingTitle = "Auto-Farm Script",
     LoadingSubtitle = "by Script Hub",
     Theme = "Default",
@@ -337,7 +436,7 @@ MainTab:CreateToggle({
 local FarmSection = MainTab:CreateSection("Farming")
 
 MainTab:CreateToggle({
-    Name = "Auto-Farm Enemies",
+    Name = "Auto-Farm Enemies (TP)",
     CurrentValue = false,
     Flag = "AutoFarm",
     Callback = function(Value)
@@ -400,6 +499,23 @@ MainTab:CreateToggle({
                 Content = "Auto-repeat enabled!",
                 Duration = 3,
                 Image = "repeat"
+            })
+        end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Auto-Reset at Room 5",
+    CurrentValue = false,
+    Flag = "AutoReset",
+    Callback = function(Value)
+        Toggles.AutoReset = Value
+        if Value then
+            Rayfield:Notify({
+                Title = "Auto-Reset",
+                Content = "Will reset ONLY when Room 5 is completely cleared!",
+                Duration = 3,
+                Image = "refresh-cw"
             })
         end
     end
