@@ -1,0 +1,219 @@
+import React, { useState } from 'react';
+import { DollarSign, Video, Eye, Copy, Check } from 'lucide-react';
+
+export default function PaymentCalculator() {
+  const [youtuberName, setYoutuberName] = useState('');
+  const [totalVideos, setTotalVideos] = useState('');
+  const [excessViews, setExcessViews] = useState('');
+  const [shortsCount, setShortsCount] = useState('');
+  const [shortsRate, setShortsRate] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const calculatePayment = () => {
+    const videos = parseFloat(totalVideos) || 0;
+    const views = parseFloat(excessViews) || 0;
+    const shorts = parseFloat(shortsCount) || 0;
+    const rate = parseFloat(shortsRate) || 0;
+
+    const videoBase = videos * 20;
+    const viewBonus = (views / 1000) * 25;
+    const shortsTotal = shorts * rate;
+
+    return {
+      videoBase,
+      viewBonus,
+      shortsTotal,
+      total: videoBase + viewBonus + shortsTotal
+    };
+  };
+
+  const copyToClipboard = async () => {
+    const payment = calculatePayment();
+    const text = `Payment Summary - ${youtuberName || 'YouTuber'}
+
+Regular Videos:
+- Total Videos: ${totalVideos || 0}
+- Video Base Pay: ${payment.videoBase.toFixed(2)}
+- Views Over 1K: ${excessViews || 0}
+- View Bonus: ${payment.viewBonus.toFixed(2)}
+
+Shorts:
+- Number of Shorts: ${shortsCount || 0}
+- Rate Per Short: ${shortsRate || 0}
+- Shorts Total: ${payment.shortsTotal.toFixed(2)}
+
+TOTAL PAYMENT: ${payment.total.toFixed(2)}`;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const payment = calculatePayment();
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-6">
+      <div className="max-w-2xl mx-auto">
+        <div className="bg-white rounded-2xl shadow-xl p-8">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="bg-purple-100 p-3 rounded-lg">
+              <DollarSign className="w-8 h-8 text-purple-600" />
+            </div>
+            <h1 className="text-3xl font-bold text-gray-800">Payment Calculator</h1>
+          </div>
+
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              YouTuber Name
+            </label>
+            <input
+              type="text"
+              value={youtuberName}
+              onChange={(e) => setYoutuberName(e.target.value)}
+              placeholder="Enter name"
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+            />
+          </div>
+
+          <div className="space-y-6">
+            {/* Regular Videos Section */}
+            <div className="bg-purple-50 p-6 rounded-xl">
+              <div className="flex items-center gap-2 mb-4">
+                <Video className="w-5 h-5 text-purple-600" />
+                <h2 className="text-xl font-semibold text-gray-800">Regular Videos</h2>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Total Number of Videos
+                  </label>
+                  <input
+                    type="number"
+                    value={totalVideos}
+                    onChange={(e) => setTotalVideos(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  />
+                  <p className="text-sm text-gray-500 mt-1">$20 guaranteed per video</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <Eye className="w-4 h-4 inline mr-1" />
+                    Total Views Over 1,000 (Combined)
+                  </label>
+                  <input
+                    type="number"
+                    value={excessViews}
+                    onChange={(e) => setExcessViews(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-purple-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  />
+                  <p className="text-sm text-gray-500 mt-1">
+                    Add all views above 1k together. Example: Video 1 has 3,500 views → add 2,500. Video 2 has 1,800 views → add 800. Total: 3,300
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Shorts Section */}
+            <div className="bg-blue-50 p-6 rounded-xl">
+              <div className="flex items-center gap-2 mb-4">
+                <Video className="w-5 h-5 text-blue-600" />
+                <h2 className="text-xl font-semibold text-gray-800">Shorts</h2>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Payment Per Short ($)
+                  </label>
+                  <input
+                    type="number"
+                    value={shortsRate}
+                    onChange={(e) => setShortsRate(e.target.value)}
+                    placeholder="0.00"
+                    step="0.01"
+                    className="w-full px-4 py-3 border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Number of Shorts Produced
+                  </label>
+                  <input
+                    type="number"
+                    value={shortsCount}
+                    onChange={(e) => setShortsCount(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-blue-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Payment Breakdown */}
+            <div className="bg-gradient-to-r from-purple-600 to-blue-600 p-6 rounded-xl text-white">
+              <h2 className="text-xl font-semibold mb-4">Payment Breakdown</h2>
+              
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-purple-100">Video Base Pay:</span>
+                  <span className="font-semibold text-lg">
+                    ${payment.videoBase.toFixed(2)}
+                  </span>
+                </div>
+                
+                <div className="flex justify-between items-center">
+                  <span className="text-purple-100">View Bonus:</span>
+                  <span className="font-semibold text-lg">
+                    ${payment.viewBonus.toFixed(2)}
+                  </span>
+                </div>
+                
+                <div className="flex justify-between items-center">
+                  <span className="text-purple-100">Shorts Total:</span>
+                  <span className="font-semibold text-lg">
+                    ${payment.shortsTotal.toFixed(2)}
+                  </span>
+                </div>
+                
+                <div className="border-t border-purple-300 pt-3 mt-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xl font-bold">Total Payment:</span>
+                    <span className="text-3xl font-bold">
+                      ${payment.total.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={copyToClipboard}
+                className="mt-6 w-full flex items-center justify-center gap-2 px-6 py-3 bg-white text-purple-600 rounded-lg hover:bg-purple-50 transition-colors font-semibold"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-5 h-5" />
+                    Copied!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-5 h-5" />
+                    Copy to Clipboard
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
