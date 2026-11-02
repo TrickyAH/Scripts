@@ -64,7 +64,8 @@ local RARITIES = {
 }
 local SELL_TYPES = { "Ores", "Miners", "Pickaxes" }
 local STAND_OFFSET = Vector3.new(0, 3, 6)
-local HOP_SETTLE = 0.5
+local HOP_SETTLES = { 0.12, 0.2, 0.35 }
+local SALE_CONFIRM_TIME = 0.8
 local MIN_SELL_WORTH = 1000
 local CREW_STATS = { false, "Speed", "MineSpeed" }
 
@@ -510,8 +511,9 @@ end
 ---Hop beside a stand, run an action, and return to the starting spot.
 ---@param stand Model
 ---@param action function
+---@param settle number
 ---@return boolean
-local function hopToStand(stand, action)
+local function hopToStand(stand, action, settle)
 	local humanoid, rootPart = getBody()
 	local prompt = stand and stand:FindFirstChildWhichIsA("ProximityPrompt", true)
 
@@ -521,18 +523,25 @@ local function hopToStand(stand, action)
 
 	local target = prompt.Parent:IsA("BasePart") and prompt.Parent.Position or stand:GetPivot().Position
 	local home = rootPart.CFrame
+	local camera = workspace.CurrentCamera
+	local cameraType = camera.CameraType
+
+	-- Hold the camera still so the player's screen doesn't jump during the hop.
+	camera.CameraType = Enum.CameraType.Scriptable
 
 	rootPart.CFrame = CFrame.new(target + STAND_OFFSET)
-	task.wait(HOP_SETTLE)
+	task.wait(settle)
 
 	local success, message = pcall(action)
 
-	task.wait(HOP_SETTLE)
+	task.wait(settle)
 
 	-- Always go home, even when the action failed.
 	if rootPart.Parent then
 		rootPart.CFrame = home
 	end
+
+	camera.CameraType = cameraType
 
 	if not success then
 		warn(string.format("[AutoFarm] Hop: %s", tostring(message)))
@@ -612,17 +621,34 @@ local function sellInventory()
 
 	session.status = "Selling your bag."
 
-	local data = getData()
-	local moneyBefore = data.Money
-	local hopped = hopToStand(workspace:FindFirstChild("SellStand"), function()
-		send("MineSellItems", keys)
-	end)
+	local moneyBefore = getData().Money
 
-	-- Only count sales the server really paid for.
-	if hopped and getData().Money ~= moneyBefore then
-		session.sells += 1
-		logActivity(string.format("Sold %d stacks", #keys))
+	-- The server's distance check needs a moment to see the hop, so start short and retry longer.
+	for _, settle in ipairs(HOP_SETTLES) do
+		local hopped = hopToStand(workspace:FindFirstChild("SellStand"), function()
+			send("MineSellItems", keys)
+		end, settle)
+
+		if not hopped then
+			return
+		end
+
+		local waitedSince = os.clock()
+
+		-- Only count sales the server really paid for.
+		while os.clock() - waitedSince < SALE_CONFIRM_TIME do
+			if getData().Money ~= moneyBefore then
+				session.sells += 1
+				logActivity(string.format("Sold %d stacks", #keys))
+
+				return
+			end
+
+			task.wait(0.1)
+		end
 	end
+
+	logActivity("Sale refused by the server")
 end
 
 ---Count owned copies of a pickaxe. The saved count already includes equipped ones.
