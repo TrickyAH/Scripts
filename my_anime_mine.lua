@@ -30,8 +30,23 @@ local AutoFarm = {
 		height = 750,
 		sellInterval = 30,
 		indexLimit = 30,
-		sellRarities = { Common = true, Uncommon = true, Rare = true, Epic = true, Legendary = true },
-		sellTypes = { Ores = true, Miners = true },
+		sellOres = {
+			Common = true,
+			Uncommon = true,
+			Rare = true,
+			Epic = true,
+			Legendary = true,
+			Mythical = true,
+			Exotic = true,
+			Limited = true,
+			Exclusive = true,
+			Scaled = true,
+		},
+		sellUnits = { Common = true, Uncommon = true, Rare = true, Epic = true, Legendary = true },
+		sellItems = {},
+		crewDamageStop = 100,
+		crewSpeedStop = 17,
+		crewMiningStop = 16,
 		mutateTarget = "Platinum",
 		mutateMode = "Both",
 		mutateSpend = 50,
@@ -67,7 +82,8 @@ local RARITIES = {
 	"Exclusive",
 	"Scaled",
 }
-local SELL_TYPES = { "Ores", "Miners", "Pickaxes" }
+local SPARE_PICKAXES = "Spare pickaxes"
+local ITEM_SELL_OPTIONS = { SPARE_PICKAXES }
 local MUTATION_TARGETS = { "Bronze", "Diamond", "Platinum", "Rainbow", "Frozen", "Inferno", "Nightmare", "Unreal" }
 local MUTATE_MODES = { "Both", "Whole crew", "Best miner" }
 local MUTATE_SPEND_RANGE = { 10, 100 }
@@ -78,11 +94,22 @@ local MUTATE_EQUIP_WINDOW = 30
 local STAND_OFFSET = Vector3.new(0, 3, 6)
 local HOP_SETTLES = { 0.12, 0.2, 0.35 }
 local SALE_CONFIRM_TIME = 0.8
+local PLACE_WAIT = 3
+local PLACE_STEP_DELAY = 0.5
+local PLACE_HOP_SETTLE = 0.7
+local PAD_OFFSET = Vector3.new(0, 2.5, 1.5)
+local MAX_SWAPS_PER_RUN = 3
+local SWAP_MARGIN = 1.05
+local CREW_INTERVAL = 1
 local ANNEX_HOP_SETTLE = 0.35
 local MIN_SELL_WORTH = 1000
 local CREW_UPGRADES_PER_CYCLE = 24
+local CREW_STOPS = {
+	{ key = "crewDamageStop", title = "Stop damage at", range = { 1, 100 } },
+	{ key = "crewSpeedStop", title = "Stop speed at", range = { 1, 17 } },
+	{ key = "crewMiningStop", title = "Stop mining at", range = { 1, 16 } },
+}
 local CREW_UPGRADE_DELAY = 0.2
-local CREW_RETRY_COOLDOWN = 5
 
 local SIDEBAR_WIDTH = 242
 local MAX_ACTIVITY_LINES = 6
@@ -270,7 +297,7 @@ local PAGES = {
 				custom = "sellTimer",
 				rows = {
 					{ "AutoTake", "Auto Take Chest", "Takes everything from your chest." },
-					{ "AutoEquipBest", "Auto Equip Best", "Arranges your crew after each take." },
+					{ "AutoEquipBest", "Auto Equip Best", "Places your strongest miners by real damage." },
 					{ "AutoSell", "Auto Sell", "Hops to the buyer and sells your bag." },
 				},
 			},
@@ -293,6 +320,7 @@ local PAGES = {
 			{
 				title = "Crew",
 				column = 1,
+				custom = "crew",
 				rows = { { "AutoCrew", "Auto Crew Upgrades", "Levels damage and both speeds." } },
 			},
 			{
@@ -538,8 +566,9 @@ end
 ---@param stand Model
 ---@param action function
 ---@param settle number
+---@param offset Vector3?
 ---@return boolean
-local function hopToStand(stand, action, settle)
+local function hopToStand(stand, action, settle, offset)
 	local humanoid, rootPart = getBody()
 	local prompt = stand and stand:FindFirstChildWhichIsA("ProximityPrompt", true)
 
@@ -553,9 +582,12 @@ local function hopToStand(stand, action, settle)
 	local cameraType = camera.CameraType
 
 	-- Hold the camera still so the player's screen doesn't jump during the hop.
-	camera.CameraType = Enum.CameraType.Scriptable
+	-- Pad hops skip this, because the game won't show a prompt to a frozen camera.
+	if not offset then
+		camera.CameraType = Enum.CameraType.Scriptable
+	end
 
-	rootPart.CFrame = CFrame.new(target + STAND_OFFSET)
+	rootPart.CFrame = CFrame.new(target + (offset or STAND_OFFSET))
 	task.wait(settle)
 
 	local success, message = pcall(action)
@@ -567,7 +599,9 @@ local function hopToStand(stand, action, settle)
 		rootPart.CFrame = home
 	end
 
-	camera.CameraType = cameraType
+	if not offset then
+		camera.CameraType = cameraType
+	end
 
 	if not success then
 		warn(string.format("[AutoFarm] Hop: %s", tostring(message)))
@@ -606,8 +640,11 @@ local function getSellPlan(mineGame)
 
 		-- Mutations cost a lot to roll, so a mutated miner is never sold.
 		local mutated = sellType == "Miners" and variant ~= nil and variant ~= MineConfig.DefaultVariant
+		local allowed = (sellType == "Ores" and settings.sellOres[entry.Rarity])
+			or (sellType == "Miners" and settings.sellUnits[entry.Rarity])
+			or (sellType == "Pickaxes" and settings.sellItems[SPARE_PICKAXES])
 
-		if sellType and count > 0 and not mutated and settings.sellTypes[sellType] and settings.sellRarities[entry.Rarity] then
+		if allowed and count > 0 and not mutated then
 			keys[#keys + 1] = entry.Key
 			worth += tonumber(entry.Worth) or 0
 		end
@@ -631,11 +668,241 @@ local function takeChest()
 	return true
 end
 
----Arrange the crew.
+---Get a miner's damage from its name, level and mutation, ignoring its pickaxe.
+---@param mineGame table
+---@param stack table
+---@return number
+local function getStackPower(mineGame, stack)
+	return tonumber(MineConfig.GetHolderDamage({
+		CharName = stack.CharName,
+		CharLevel = stack.CharLevel,
+		CharVariant = stack.CharVariant,
+	}, mineGame)) or 0
+end
+
+---Find the strongest miner in the bag, reading its level and mutation from its stack key.
+---@param mineGame table
+---@return string?, number
+local function findBestSpare(mineGame)
+	local bestKey, bestPower = nil, 0
+
+	for key, count in pairs(mineGame.Characters or {}) do
+		local parts = string.split(tostring(key), "|")
+		local item = Items.GetItemData(parts[1])
+
+		if (tonumber(count) or 0) > 0 and item and item.MineRole ~= "Hauler" then
+			local power = getStackPower(mineGame, {
+				CharName = parts[1],
+				CharLevel = tonumber(parts[2]) or 1,
+				CharVariant = parts[3] or MineConfig.DefaultVariant,
+			})
+
+			if power > bestPower then
+				bestKey, bestPower = key, power
+			end
+		end
+	end
+
+	return bestKey, bestPower
+end
+
+---Find the weakest pad. An empty pad always counts as the weakest.
+---@param mineGame table
+---@return string?, number
+local function findWeakestPad(mineGame)
+	local weakestKey, weakestPower = nil, math.huge
+
+	for slot = 1, mineGame.MinerSlots or 0 do
+		local key = "M" .. slot
+		local holder = (mineGame.Holders or {})[key]
+		local power = 0
+
+		if holder and holder.CharName then
+			power = getStackPower(mineGame, holder)
+		end
+
+		if power < weakestPower then
+			weakestKey, weakestPower = key, power
+		end
+	end
+
+	return weakestKey, weakestPower
+end
+
+---Wait for a pad prompt to offer placing the held miner.
+---@param prompt ProximityPrompt
+---@return boolean
+local function waitForPlacePrompt(prompt)
+	local startedAt = os.clock()
+
+	while os.clock() - startedAt < PLACE_WAIT do
+		if string.find(prompt.ActionText, "^Place") then
+			return true
+		end
+
+		task.wait(0.1)
+	end
+
+	return false
+end
+
+---Hold a miner and place it on a pad. The prompt is checked first, so nothing gets picked up by mistake.
+---@param mineGame table
+---@param stackKey string
+---@param padKey string
+---@return boolean
+local function placeMiner(mineGame, stackKey, padKey)
+	local plot = getPlot()
+	local holders = plot and plot:FindFirstChild("Holders")
+	local pad = holders and holders:FindFirstChild(padKey)
+	local prompt = pad and pad:FindFirstChild("HolderPrompt", true)
+
+	if not prompt then
+		return false
+	end
+
+	---Press the pad's prompt from beside it, only if it offers the expected action.
+	---@param action string
+	local function pressPrompt(action)
+		hopToStand(pad, function()
+			if string.find(prompt.ActionText, action) then
+				prompt:InputHoldBegin()
+				task.wait(0.15)
+				prompt:InputHoldEnd()
+			end
+		end, PLACE_HOP_SETTLE, PAD_OFFSET)
+	end
+
+	---Check whether the pad currently holds a miner.
+	---@return table?
+	local function getPadMiner()
+		local _, current = getData()
+		local holder = (current.Holders or {})[padKey]
+
+		return holder and holder.CharName and holder or nil
+	end
+
+	-- The game ignores placing onto an occupied pad, so the old miner goes back to the bag first.
+	if getPadMiner() then
+		pressPrompt("^Pick up")
+		task.wait(PLACE_STEP_DELAY)
+
+		if getPadMiner() then
+			return false
+		end
+	end
+
+	local parts = string.split(stackKey, "|")
+	local slot = tostring(MineInventory.TargetSlot(mineGame, stackKey))
+
+	send("MineAssignHotbar", slot, stackKey)
+	task.wait(PLACE_STEP_DELAY)
+	send("MineEquipSlot", slot)
+
+	if waitForPlacePrompt(prompt) then
+		pressPrompt("^Place")
+	end
+
+	send("MineEquipSlot", "")
+	task.wait(PLACE_STEP_DELAY)
+
+	local placed = getPadMiner()
+
+	return placed ~= nil
+		and placed.CharName == parts[1]
+		and MineConfig.GetHolderVariant(placed) == (parts[3] or MineConfig.DefaultVariant)
+end
+
+---Give the strongest miners the strongest pickaxes.
+---@param mineGame table
+---@return boolean
+local function arrangePickaxes(mineGame)
+	local pads, assigned = {}, {}
+
+	for slot = 1, mineGame.MinerSlots or 0 do
+		local key = "M" .. slot
+		local holder = (mineGame.Holders or {})[key]
+
+		if holder and holder.CharName then
+			pads[#pads + 1] = { key = key, power = getStackPower(mineGame, holder), pickaxe = holder.Pickaxe }
+
+			if holder.Pickaxe then
+				assigned[holder.Pickaxe] = (assigned[holder.Pickaxe] or 0) + 1
+			end
+		end
+	end
+
+	table.sort(pads, function(left, right)
+		return left.power > right.power
+	end)
+
+	local owned = {}
+
+	for name, count in pairs(mineGame.Pickaxes or {}) do
+		local definition = MineConfig.GetPickaxeByName(name)
+
+		if definition then
+			owned[#owned + 1] = { name = name, multiplier = definition.Multiplier, count = tonumber(count) or 0 }
+		end
+	end
+
+	table.sort(owned, function(left, right)
+		return left.multiplier > right.multiplier
+	end)
+
+	local index = 0
+
+	for _, pickaxe in ipairs(owned) do
+		for _ = 1, pickaxe.count do
+			index += 1
+
+			local pad = pads[index]
+
+			if not pad then
+				return false
+			end
+
+			local spare = pickaxe.count - (assigned[pickaxe.name] or 0)
+
+			if pad.pickaxe ~= pickaxe.name then
+				if spare > 0 then
+					send("MineEquipPickaxe", pad.key, pickaxe.name)
+					task.wait(PLACE_STEP_DELAY)
+
+					return true
+				end
+			end
+		end
+	end
+
+	return false
+end
+
+---Arrange the crew by real damage. The game's Equip Best benches mutated miners.
 local function equipBest()
 	session.arranging = true
-	send("MineEquipBest")
-	task.wait(1)
+
+	for _ = 1, MAX_SWAPS_PER_RUN do
+		local _, mineGame = getData()
+		local stackKey, sparePower = findBestSpare(mineGame)
+		local padKey, padPower = findWeakestPad(mineGame)
+
+		if not stackKey or not padKey or sparePower <= padPower * SWAP_MARGIN then
+			break
+		end
+
+		if not placeMiner(mineGame, stackKey, padKey) then
+			logActivity(string.format("Could not place %s on %s", string.split(stackKey, "|")[1], padKey))
+			break
+		end
+
+		logActivity(string.format("Placed %s on %s", string.split(stackKey, "|")[1], padKey))
+	end
+
+	local _, currentGame = getData()
+
+	arrangePickaxes(currentGame)
+
 	session.arranging = false
 	session.lastEquip = os.clock()
 end
@@ -654,7 +921,15 @@ local function sellInventory()
 
 	session.status = "Selling your bag."
 
-	local moneyBefore = getData().Money
+	---Read the game's sold-items counter. Cash can't confirm a sale, because upgrades spend it at the same time.
+	---@return number
+	local function getItemsSold()
+		local _, current = getData()
+
+		return tonumber(current.Stats and current.Stats.ItemsSold) or 0
+	end
+
+	local soldBefore = getItemsSold()
 
 	-- The server's distance check needs a moment to see the hop, so start short and retry longer.
 	for _, settle in ipairs(HOP_SETTLES) do
@@ -670,7 +945,7 @@ local function sellInventory()
 
 		-- Only count sales the server really paid for.
 		while os.clock() - waitedSince < SALE_CONFIRM_TIME do
-			if getData().Money ~= moneyBefore then
+			if getItemsSold() ~= soldBefore then
 				session.sells += 1
 				logActivity(string.format("Sold %d stacks", #keys))
 
@@ -817,6 +1092,9 @@ local function buySkills()
 	end
 end
 
+-- Defined further down, and needed by the crew loop.
+local isSavingForZone
+
 ---Find the cheapest upgrade the crew can use, using the game's own costs and caps.
 ---@param data table
 ---@param mineGame table
@@ -825,15 +1103,21 @@ local function findCrewUpgrade(data, mineGame)
 	local money = tonumber(data.Money) or 0
 	local bestHolder, bestStat, bestCost = nil, nil, math.huge
 
-	---Keep this upgrade if it is the cheapest one so far.
+	local bestHolderAny, bestStatAny, bestCostAny = nil, nil, math.huge
+
+	---Keep this upgrade if it is the cheapest of its kind. Damage is tracked on its own so it comes first.
 	---@param holderKey string
 	---@param stat string
 	---@param cost number?
 	local function consider(holderKey, stat, cost)
-		local affordable = type(cost) == "number" and cost <= money
+		if type(cost) ~= "number" or cost > money then
+			return
+		end
 
-		if affordable and cost < bestCost and isReady("Crew" .. holderKey .. stat) then
+		if stat == "Damage" and cost < bestCost then
 			bestHolder, bestStat, bestCost = holderKey, stat, cost
+		elseif stat ~= "Damage" and cost < bestCostAny then
+			bestHolderAny, bestStatAny, bestCostAny = holderKey, stat, cost
 		end
 	end
 
@@ -847,29 +1131,40 @@ local function findCrewUpgrade(data, mineGame)
 			local speed = MineConfig.GetHolderSpeedLevel(holder)
 			local mining = MineConfig.GetHolderMineSpeedLevel(holder)
 
-			if level < MineConfig.GetCharLevelCap(mineGame, holderKey, holder, item, Items.GetItemData) then
+			local settings = AutoFarm.settings
+			local damageCap = MineConfig.GetCharLevelCap(mineGame, holderKey, holder, item, Items.GetItemData)
+
+			if level < math.min(damageCap, settings.crewDamageStop) then
 				consider(holderKey, "Damage", MineConfig.GetCharacterUpgradeCost(level, item))
 			end
 
-			if speed < MineConfig.CharSpeedMaxLevel then
+			if speed < math.min(MineConfig.CharSpeedMaxLevel, settings.crewSpeedStop) then
 				consider(holderKey, "Speed", MineConfig.GetCharacterSpeedUpgradeCost(speed, item))
 			end
 
-			if mining < MineConfig.CharMineSpeedMaxLevel then
+			if mining < math.min(MineConfig.CharMineSpeedMaxLevel, settings.crewMiningStop) then
 				consider(holderKey, "MineSpeed", MineConfig.GetCharacterMineSpeedUpgradeCost(mining, item))
 			end
 		end
 	end
 
-	return bestHolder, bestStat
+	if bestHolder then
+		return bestHolder, bestStat
+	end
+
+	return bestHolderAny, bestStatAny
 end
 
----Buy the cheapest crew upgrades first, so every miner rises together.
+---Buy upgrades for the miners on pads, damage first and cheapest first.
 local function buyCrew()
+	if not AutoFarm.toggles.AutoCrew or session.arranging or isSavingForZone() then
+		return
+	end
+
 	for _ = 1, CREW_UPGRADES_PER_CYCLE do
 		local data, mineGame = getData()
 
-		if not AutoFarm.running or not canAct() then
+		if not AutoFarm.running or not AutoFarm.toggles.AutoCrew or not canAct() then
 			return
 		end
 
@@ -879,15 +1174,8 @@ local function buyCrew()
 			return
 		end
 
-		local moneyBefore = data.Money
-
 		send("MineUpgradeCharacter", holderKey, stat)
 		task.wait(CREW_UPGRADE_DELAY)
-
-		-- Skip this upgrade briefly if the server refused it, so the rest of the crew still levels.
-		if getData().Money == moneyBefore then
-			cooldowns["Crew" .. holderKey .. stat] = os.clock() + CREW_RETRY_COOLDOWN
-		end
 	end
 end
 
@@ -920,7 +1208,7 @@ end
 
 ---Check whether the next zone is close enough that crew spending should wait.
 ---@return boolean
-local function isSavingForZone()
+function isSavingForZone()
 	if not AutoFarm.toggles.AutoZones then
 		return false
 	end
@@ -1142,10 +1430,6 @@ local function runCycle()
 
 	if toggles.AutoCore then
 		buyCore()
-	end
-
-	if toggles.AutoCrew then
-		buyCrew()
 	end
 
 	if not hunting then
@@ -2262,6 +2546,226 @@ local function addSlider(box, key, title, range, suffix)
 	return frame
 end
 
+---Create one checkbox row and add its paint function to the list.
+---@param parent Instance
+---@param option string
+---@param order number
+---@param settingKey string
+---@param single boolean?
+---@param paints function[]
+---@param onChange function
+local function addOptionRow(parent, option, order, settingKey, single, paints, onChange)
+	local row = create("TextButton", {
+		AutoButtonColor = false,
+		BackgroundColor3 = THEME.field,
+		BorderSizePixel = 0,
+		Font = Enum.Font.Gotham,
+		LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 30),
+		Text = option,
+		TextColor3 = THEME.text,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = parent,
+	})
+
+	style(row, 7)
+	hover(row, THEME.field, THEME.track)
+	addPress(row)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 34), Parent = row })
+
+	local check = create("Frame", {
+		BackgroundColor3 = THEME.track,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0, -24, 0.5, -7),
+		Size = UDim2.fromOffset(14, 14),
+		Parent = row,
+	})
+
+	style(check, 4)
+
+	local function paint()
+		local setting = AutoFarm.settings[settingKey]
+		local selected = if single then setting == option else setting[option]
+
+		fadeColor(check, "BackgroundColor3", selected and THEME.green or THEME.track)
+		check.Size = UDim2.fromOffset(10, 10)
+		check.Position = UDim2.new(0, -22, 0.5, -5)
+		tween(
+			check,
+			{ Size = UDim2.fromOffset(14, 14), Position = UDim2.new(0, -24, 0.5, -7) },
+			0.26,
+			Enum.EasingStyle.Back
+		)
+	end
+
+	paints[#paints + 1] = paint
+
+	row.MouseButton1Click:Connect(function()
+		if single then
+			AutoFarm.settings[settingKey] = option
+
+			for _, repaint in ipairs(paints) do
+				repaint()
+			end
+		else
+			local selection = AutoFarm.settings[settingKey]
+
+			selection[option] = not selection[option] or nil
+			paint()
+		end
+
+		onChange()
+	end)
+
+	paint()
+end
+
+---Create a dropdown with tabs, each holding its own checkbox list.
+---@param box Frame
+---@param title string
+---@param tabs table[]
+local function addTabbedDropdown(box, title, tabs)
+	local header = addButton(box, title, nil, function() end)
+	local list = create("Frame", {
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		LayoutOrder = nextOrder(box),
+		Size = UDim2.fromScale(1, 0),
+		Visible = false,
+		Parent = box,
+	})
+
+	create("UIListLayout", {
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = list,
+	})
+
+	ui.noReveal[list] = true
+	header.TextXAlignment = Enum.TextXAlignment.Left
+	create("UIPadding", { PaddingLeft = UDim.new(0, 12), Parent = header })
+
+	local chevron = create("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Position = UDim2.new(1, -20, 0.5, 0),
+		Size = UDim2.fromOffset(16, 16),
+		Text = "›",
+		TextColor3 = THEME.muted,
+		TextSize = 18,
+		Parent = header,
+	})
+
+	local strip = addButtonRow(list)
+	local paints = {}
+	local isOpen = false
+	local activeTab = tabs[1]
+	local dropdownToken = 0
+
+	---Get the open height of the active tab.
+	---@return number
+	local function getOpenHeight()
+		local count = #activeTab.options
+
+		return 42 + count * 30 + (count - 1) * 2
+	end
+
+	---Show how many options each tab has selected.
+	local function paintHeader()
+		local parts = {}
+
+		for _, tab in ipairs(tabs) do
+			local selected = 0
+
+			for _, option in ipairs(tab.options) do
+				selected += AutoFarm.settings[tab.key][option] and 1 or 0
+			end
+
+			parts[#parts + 1] = string.format("%s %d", tab.short, selected)
+		end
+
+		header.Text = string.format("%s  (%s)", title, table.concat(parts, ", "))
+	end
+
+	---Show one tab and resize to fit it.
+	---@param tab table
+	local function selectTab(tab)
+		activeTab = tab
+
+		for _, other in ipairs(tabs) do
+			local selected = other == tab
+
+			other.body.Visible = selected
+			setColor(other.button:FindFirstChildOfClass("UIStroke"), "Color", selected and THEME.purple or THEME.cardEdge)
+			fadeColor(other.button, "TextColor3", selected and THEME.text or THEME.muted)
+		end
+
+		if isOpen then
+			tween(list, { Size = UDim2.new(1, 0, 0, getOpenHeight()) }, 0.26)
+		end
+	end
+
+	for order, tab in ipairs(tabs) do
+		tab.button = addButton(strip, tab.name, nil, function()
+			selectTab(tab)
+		end)
+
+		tab.body = create("Frame", {
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			LayoutOrder = order + 1,
+			Size = UDim2.fromScale(1, 0),
+			Visible = false,
+			Parent = list,
+		})
+
+		create("UIListLayout", {
+			Padding = UDim.new(0, 2),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = tab.body,
+		})
+
+		for optionOrder, option in ipairs(tab.options) do
+			addOptionRow(tab.body, option, optionOrder, tab.key, false, paints, paintHeader)
+		end
+	end
+
+	header.MouseButton1Click:Connect(function()
+		isOpen = not isOpen
+		dropdownToken += 1
+
+		local token = dropdownToken
+
+		tween(chevron, { Rotation = isOpen and 90 or 0 }, 0.24)
+
+		if isOpen then
+			list.Visible = true
+			tween(list, { Size = UDim2.new(1, 0, 0, getOpenHeight()) }, 0.3)
+		else
+			tween(list, { Size = UDim2.fromScale(1, 0) }, 0.22)
+
+			task.delay(0.22, function()
+				if token == dropdownToken then
+					list.Visible = false
+				end
+			end)
+		end
+	end)
+
+	ui.paints[#ui.paints + 1] = function()
+		for _, paint in ipairs(paints) do
+			paint()
+		end
+
+		paintHeader()
+	end
+
+	selectTab(tabs[1])
+	paintHeader()
+end
+
 ---Create a multi-select dropdown. It opens inside the section, so nothing gets cut off.
 ---@param box Frame
 ---@param title string
@@ -2324,68 +2828,7 @@ local function addDropdown(box, title, options, settingKey, single)
 	end
 
 	for order, option in ipairs(options) do
-		local row = create("TextButton", {
-			AutoButtonColor = false,
-			BackgroundColor3 = THEME.field,
-			BorderSizePixel = 0,
-			Font = Enum.Font.Gotham,
-			LayoutOrder = order,
-			Size = UDim2.new(1, 0, 0, 30),
-			Text = option,
-			TextColor3 = THEME.text,
-			TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = list,
-		})
-
-		style(row, 7)
-		hover(row, THEME.field, THEME.track)
-		addPress(row)
-		create("UIPadding", { PaddingLeft = UDim.new(0, 34), Parent = row })
-
-		local check = create("Frame", {
-			BackgroundColor3 = THEME.track,
-			BorderSizePixel = 0,
-			Position = UDim2.new(0, -24, 0.5, -7),
-			Size = UDim2.fromOffset(14, 14),
-			Parent = row,
-		})
-
-		style(check, 4)
-
-		paints[order] = function()
-			local setting = AutoFarm.settings[settingKey]
-			local selected = if single then setting == option else setting[option]
-
-			fadeColor(check, "BackgroundColor3", selected and THEME.green or THEME.track)
-			check.Size = UDim2.fromOffset(10, 10)
-			check.Position = UDim2.new(0, -22, 0.5, -5)
-			tween(
-				check,
-				{ Size = UDim2.fromOffset(14, 14), Position = UDim2.new(0, -24, 0.5, -7) },
-				0.26,
-				Enum.EasingStyle.Back
-			)
-		end
-
-		row.MouseButton1Click:Connect(function()
-			if single then
-				AutoFarm.settings[settingKey] = option
-
-				for _, paint in ipairs(paints) do
-					paint()
-				end
-			else
-				local selection = AutoFarm.settings[settingKey]
-
-				selection[option] = not selection[option] or nil
-				paints[order]()
-			end
-
-			paintHeader()
-		end)
-
-		paints[order]()
+		addOptionRow(list, option, order, settingKey, single, paints, paintHeader)
 	end
 
 	header.MouseButton1Click:Connect(function()
@@ -2769,6 +3212,12 @@ local function applyConfig(saved)
 		settings.indexLimit = math.clamp(limit, INDEX_LIMIT_RANGE[1], INDEX_LIMIT_RANGE[2])
 	end
 
+	for _, stop in ipairs(CREW_STOPS) do
+		if type(savedSettings[stop.key]) == "number" then
+			settings[stop.key] = math.clamp(math.floor(savedSettings[stop.key]), stop.range[1], stop.range[2])
+		end
+	end
+
 	if type(savedSettings.mutateSpend) == "number" then
 		local spend = math.floor(savedSettings.mutateSpend)
 
@@ -2783,7 +3232,7 @@ local function applyConfig(saved)
 		settings.mutateMode = savedSettings.mutateMode
 	end
 
-	for settingKey, options in pairs({ sellRarities = RARITIES, sellTypes = SELL_TYPES }) do
+	for settingKey, options in pairs({ sellOres = RARITIES, sellUnits = RARITIES, sellItems = ITEM_SELL_OPTIONS }) do
 		if type(savedSettings[settingKey]) == "table" then
 			local selection = {}
 
@@ -3509,8 +3958,15 @@ local function createInterface()
 
 				ui.toggleHooks.AutoSell(AutoFarm.toggles.AutoSell)
 			elseif group.custom == "sell" then
-				addDropdown(box, "Rarities to sell", RARITIES, "sellRarities")
-				addDropdown(box, "Items to sell", SELL_TYPES, "sellTypes")
+				addTabbedDropdown(box, "Auto sell filters", {
+					{ name = "Ores", short = "Ores", options = RARITIES, key = "sellOres" },
+					{ name = "Units", short = "Units", options = RARITIES, key = "sellUnits" },
+				})
+				addDropdown(box, "Items to sell", ITEM_SELL_OPTIONS, "sellItems")
+			elseif group.custom == "crew" then
+				for _, stop in ipairs(CREW_STOPS) do
+					addSlider(box, stop.key, stop.title, stop.range, "lvl")
+				end
 			elseif group.custom == "mutate" then
 				addDropdown(box, "Target", MUTATION_TARGETS, "mutateTarget", true)
 				addDropdown(box, "Roll on", MUTATE_MODES, "mutateMode", true)
@@ -3761,6 +4217,7 @@ function AutoFarm.init()
 	end)
 
 	spawnLoop("Mutate", MUTATE_INTERVAL, rollMutation)
+	spawnLoop("Crew", CREW_INTERVAL, buyCrew)
 
 	spawnLoop("Extras", EXTRAS_INTERVAL, runExtras)
 	spawnLoop("Economy", CYCLE_INTERVAL, runCycle)
