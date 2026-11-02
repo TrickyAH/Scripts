@@ -20,6 +20,7 @@ local AutoFarm = {
 		AutoFocus = false,
 		AutoBigNode = false,
 		AutoAnnex = false,
+		AutoMutate = false,
 	},
 	settings = {
 		theme = "Graphite",
@@ -31,6 +32,9 @@ local AutoFarm = {
 		indexLimit = 30,
 		sellRarities = { Common = true, Uncommon = true, Rare = true, Epic = true, Legendary = true },
 		sellTypes = { Ores = true, Miners = true },
+		mutateTarget = "Platinum",
+		mutateMode = "Both",
+		mutateSpend = 50,
 	},
 }
 
@@ -64,12 +68,21 @@ local RARITIES = {
 	"Scaled",
 }
 local SELL_TYPES = { "Ores", "Miners", "Pickaxes" }
+local MUTATION_TARGETS = { "Bronze", "Diamond", "Platinum", "Rainbow", "Frozen", "Inferno", "Nightmare", "Unreal" }
+local MUTATE_MODES = { "Both", "Whole crew", "Best miner" }
+local MUTATE_SPEND_RANGE = { 10, 100 }
+local MUTATE_INTERVAL = 2
+local MUTATE_REPLY_TIME = 3
+local MUTATE_RETRY_COOLDOWN = 10
+local MUTATE_EQUIP_WINDOW = 30
 local STAND_OFFSET = Vector3.new(0, 3, 6)
 local HOP_SETTLES = { 0.12, 0.2, 0.35 }
 local SALE_CONFIRM_TIME = 0.8
 local ANNEX_HOP_SETTLE = 0.35
 local MIN_SELL_WORTH = 1000
-local CREW_STATS = { false, "Speed", "MineSpeed" }
+local CREW_UPGRADES_PER_CYCLE = 24
+local CREW_UPGRADE_DELAY = 0.2
+local CREW_RETRY_COOLDOWN = 5
 
 local SIDEBAR_WIDTH = 242
 local MAX_ACTIVITY_LINES = 6
@@ -283,6 +296,12 @@ local PAGES = {
 				rows = { { "AutoCrew", "Auto Crew Upgrades", "Levels damage and both speeds." } },
 			},
 			{
+				title = "Mutations",
+				column = 1,
+				custom = "mutate",
+				rows = { { "AutoMutate", "Auto Mutate", "Rolls until your target, then stops." } },
+			},
+			{
 				title = "Progress",
 				column = 2,
 				rows = {
@@ -365,6 +384,7 @@ local MineIndex = require(replicatedStorage.Modules.MineIndexRewardsConfig)
 local MineDailySpin = require(replicatedStorage.Modules.MineDailySpinConfig)
 local MineTrial = require(replicatedStorage.Modules.MineTrialConfig)
 local String = require(replicatedStorage.Modules.String)
+local Items = require(replicatedStorage.Modules.Items)
 
 -- Local player.
 local localPlayer = playersService.LocalPlayer
@@ -386,6 +406,9 @@ local hunt = { key = nil, startedAt = 0, skipped = {}, missing = {} }
 
 -- Whether the server says this account can claim Buff Mode.
 local buffMember = false
+
+-- The last roll result from the server.
+local mutationReply = nil
 
 -- Newest activity lines first.
 local activity = {}
@@ -579,8 +602,12 @@ local function getSellPlan(mineGame)
 	for _, entry in ipairs(MineInventory.Collect(mineGame)) do
 		local sellType = getSellType(entry)
 		local count = tonumber(entry.SellCount or entry.Count) or 0
+		local variant = string.split(tostring(entry.Key), "|")[3]
 
-		if sellType and count > 0 and settings.sellTypes[sellType] and settings.sellRarities[entry.Rarity] then
+		-- Mutations cost a lot to roll, so a mutated miner is never sold.
+		local mutated = sellType == "Miners" and variant ~= nil and variant ~= MineConfig.DefaultVariant
+
+		if sellType and count > 0 and not mutated and settings.sellTypes[sellType] and settings.sellRarities[entry.Rarity] then
 			keys[#keys + 1] = entry.Key
 			worth += tonumber(entry.Worth) or 0
 		end
@@ -606,8 +633,11 @@ end
 
 ---Arrange the crew.
 local function equipBest()
+	session.arranging = true
 	send("MineEquipBest")
 	task.wait(1)
+	session.arranging = false
+	session.lastEquip = os.clock()
 end
 
 ---Sell the bag at the item buyer.
@@ -787,32 +817,76 @@ local function buySkills()
 	end
 end
 
----Level the crew, weakest pads first.
-local function buyCrew()
-	local _, mineGame = getData()
-	local holderKeys = {}
+---Find the cheapest upgrade the crew can use, using the game's own costs and caps.
+---@param data table
+---@param mineGame table
+---@return string?, string?
+local function findCrewUpgrade(data, mineGame)
+	local money = tonumber(data.Money) or 0
+	local bestHolder, bestStat, bestCost = nil, nil, math.huge
 
-	for key in pairs(mineGame.Holders or {}) do
-		holderKeys[#holderKeys + 1] = key
+	---Keep this upgrade if it is the cheapest one so far.
+	---@param holderKey string
+	---@param stat string
+	---@param cost number?
+	local function consider(holderKey, stat, cost)
+		local affordable = type(cost) == "number" and cost <= money
+
+		if affordable and cost < bestCost and isReady("Crew" .. holderKey .. stat) then
+			bestHolder, bestStat, bestCost = holderKey, stat, cost
+		end
 	end
 
-	table.sort(holderKeys, function(left, right)
-		local leftLevel = mineGame.Holders[left].CharLevel or 1
-		local rightLevel = mineGame.Holders[right].CharLevel or 1
+	for holderKey, holder in pairs(mineGame.Holders or {}) do
+		local slot = tonumber(string.sub(holderKey, 2)) or math.huge
+		local item = type(holder.CharName) == "string" and Items.GetItemData(holder.CharName)
 
-		return leftLevel < rightLevel
-	end)
+		-- Scaled miners can't be upgraded, the same as in the game's own buttons.
+		if item and slot <= (mineGame.MinerSlots or 0) and not MineConfig.GetScaledPct(item) then
+			local level = MineConfig.GetHolderLevel(holder)
+			local speed = MineConfig.GetHolderSpeedLevel(holder)
+			local mining = MineConfig.GetHolderMineSpeedLevel(holder)
 
-	local actions = 0
-
-	for _, holderKey in ipairs(holderKeys) do
-		for _, stat in ipairs(CREW_STATS) do
-			local key = holderKey .. tostring(stat)
-
-			if actions < MAX_ACTIONS_PER_GROUP and isReady(key) then
-				purchase(key, "MineUpgradeCharacter", holderKey, stat or nil)
-				actions += 1
+			if level < MineConfig.GetCharLevelCap(mineGame, holderKey, holder, item, Items.GetItemData) then
+				consider(holderKey, "Damage", MineConfig.GetCharacterUpgradeCost(level, item))
 			end
+
+			if speed < MineConfig.CharSpeedMaxLevel then
+				consider(holderKey, "Speed", MineConfig.GetCharacterSpeedUpgradeCost(speed, item))
+			end
+
+			if mining < MineConfig.CharMineSpeedMaxLevel then
+				consider(holderKey, "MineSpeed", MineConfig.GetCharacterMineSpeedUpgradeCost(mining, item))
+			end
+		end
+	end
+
+	return bestHolder, bestStat
+end
+
+---Buy the cheapest crew upgrades first, so every miner rises together.
+local function buyCrew()
+	for _ = 1, CREW_UPGRADES_PER_CYCLE do
+		local data, mineGame = getData()
+
+		if not AutoFarm.running or not canAct() then
+			return
+		end
+
+		local holderKey, stat = findCrewUpgrade(data, mineGame)
+
+		if not holderKey then
+			return
+		end
+
+		local moneyBefore = data.Money
+
+		send("MineUpgradeCharacter", holderKey, stat)
+		task.wait(CREW_UPGRADE_DELAY)
+
+		-- Skip this upgrade briefly if the server refused it, so the rest of the crew still levels.
+		if getData().Money == moneyBefore then
+			cooldowns["Crew" .. holderKey .. stat] = os.clock() + CREW_RETRY_COOLDOWN
 		end
 	end
 end
@@ -1306,6 +1380,121 @@ local function runExtras()
 
 	if toggles.AutoAnnex then
 		expandPlot(data, mineGame)
+	end
+end
+
+---List the miners that can be rolled, strongest first, ignoring any mutation they already have.
+---@param mineGame table
+---@return table[]
+local function getRollableMiners(mineGame)
+	local miners = {}
+
+	for key, holder in pairs(mineGame.Holders or {}) do
+		local slot = tonumber(string.sub(key, 2)) or math.huge
+		local item = type(holder.CharName) == "string" and Items.GetItemData(holder.CharName)
+		local variant = MineConfig.GetHolderVariant(holder)
+
+		if item and slot <= (mineGame.MinerSlots or 0) and not MineConfig.GetScaledPct(item) then
+			if not MineConfig.IsSetterOnlyVariant(variant) then
+				miners[#miners + 1] = {
+					key = key,
+					variant = variant,
+					rank = MineConfig.GetVariantRank(variant),
+					power = (MineConfig.GetHolderDamage(holder, mineGame) or 0) / MineConfig.GetVariantMult(variant),
+					cost = MineConfig.GetMutationRollCost(item, mineGame),
+				}
+			end
+		end
+	end
+
+	table.sort(miners, function(left, right)
+		return left.power > right.power
+	end)
+
+	return miners
+end
+
+---Pick the next miner to roll. A miner at or above the target is never rolled.
+---@param data table
+---@param mineGame table
+---@return table?
+local function findMutationRoll(data, mineGame)
+	local settings = AutoFarm.settings
+	local miners = getRollableMiners(mineGame)
+	local targetRank = MineConfig.GetVariantRank(settings.mutateTarget)
+	local budget = (tonumber(data.Money) or 0) * settings.mutateSpend / 100
+
+	---Check that a miner can be rolled right now.
+	---@param miner table?
+	---@return boolean
+	local function canRoll(miner)
+		return miner ~= nil and miner.rank < targetRank and miner.cost <= budget and isReady("Mutate" .. miner.key)
+	end
+
+	if settings.mutateMode == "Whole crew" then
+		for _, miner in ipairs(miners) do
+			if canRoll(miner) then
+				return miner
+			end
+		end
+
+		return nil
+	end
+
+	if settings.mutateMode == "Both" then
+		local waiting = false
+
+		-- Every first roll is a guaranteed gain, so unmutated miners go first.
+		for _, miner in ipairs(miners) do
+			if miner.variant == MineConfig.DefaultVariant and miner.rank < targetRank then
+				if canRoll(miner) then
+					return miner
+				end
+
+				waiting = true
+			end
+		end
+
+		if waiting then
+			return nil
+		end
+	end
+
+	return canRoll(miners[1]) and miners[1] or nil
+end
+
+---Roll one miner and wait for the server's answer.
+local function rollMutation()
+	if not AutoFarm.toggles.AutoMutate or session.arranging or not canAct() then
+		return
+	end
+
+	local data, mineGame = getData()
+	local miner = findMutationRoll(data, mineGame)
+
+	if not miner then
+		return
+	end
+
+	-- Equip Best can bench a mutated miner, so settle the crew first and choose again next tick.
+	if AutoFarm.toggles.AutoEquipBest and os.clock() - (session.lastEquip or 0) > MUTATE_EQUIP_WINDOW then
+		equipBest()
+		return
+	end
+
+	mutationReply = nil
+	send("MineRollMutation", miner.key)
+
+	local sentAt = os.clock()
+
+	while not mutationReply and os.clock() - sentAt < MUTATE_REPLY_TIME do
+		task.wait(0.1)
+	end
+
+	if mutationReply then
+		logActivity(string.format("%s: %s to %s", miner.key, tostring(mutationReply.before), tostring(mutationReply.variant)))
+	else
+		cooldowns["Mutate" .. miner.key] = os.clock() + MUTATE_RETRY_COOLDOWN
 	end
 end
 
@@ -2078,7 +2267,8 @@ end
 ---@param title string
 ---@param options string[]
 ---@param settingKey string
-local function addDropdown(box, title, options, settingKey)
+---@param single boolean?
+local function addDropdown(box, title, options, settingKey, single)
 	local header = addButton(box, title, nil, function() end)
 	local list = create("Frame", {
 		BackgroundTransparency = 1,
@@ -2119,6 +2309,11 @@ local function addDropdown(box, title, options, settingKey)
 
 	---Show how many options are selected.
 	local function paintHeader()
+		if single then
+			header.Text = string.format("%s: %s", title, tostring(AutoFarm.settings[settingKey]))
+			return
+		end
+
 		local selected = 0
 
 		for _, option in ipairs(options) do
@@ -2159,7 +2354,8 @@ local function addDropdown(box, title, options, settingKey)
 		style(check, 4)
 
 		paints[order] = function()
-			local selected = AutoFarm.settings[settingKey][option]
+			local setting = AutoFarm.settings[settingKey]
+			local selected = if single then setting == option else setting[option]
 
 			fadeColor(check, "BackgroundColor3", selected and THEME.green or THEME.track)
 			check.Size = UDim2.fromOffset(10, 10)
@@ -2173,10 +2369,19 @@ local function addDropdown(box, title, options, settingKey)
 		end
 
 		row.MouseButton1Click:Connect(function()
-			local selection = AutoFarm.settings[settingKey]
+			if single then
+				AutoFarm.settings[settingKey] = option
 
-			selection[option] = not selection[option] or nil
-			paints[order]()
+				for _, paint in ipairs(paints) do
+					paint()
+				end
+			else
+				local selection = AutoFarm.settings[settingKey]
+
+				selection[option] = not selection[option] or nil
+				paints[order]()
+			end
+
 			paintHeader()
 		end)
 
@@ -2564,6 +2769,20 @@ local function applyConfig(saved)
 		settings.indexLimit = math.clamp(limit, INDEX_LIMIT_RANGE[1], INDEX_LIMIT_RANGE[2])
 	end
 
+	if type(savedSettings.mutateSpend) == "number" then
+		local spend = math.floor(savedSettings.mutateSpend)
+
+		settings.mutateSpend = math.clamp(spend, MUTATE_SPEND_RANGE[1], MUTATE_SPEND_RANGE[2])
+	end
+
+	if table.find(MUTATION_TARGETS, savedSettings.mutateTarget) then
+		settings.mutateTarget = savedSettings.mutateTarget
+	end
+
+	if table.find(MUTATE_MODES, savedSettings.mutateMode) then
+		settings.mutateMode = savedSettings.mutateMode
+	end
+
 	for settingKey, options in pairs({ sellRarities = RARITIES, sellTypes = SELL_TYPES }) do
 		if type(savedSettings[settingKey]) == "table" then
 			local selection = {}
@@ -2631,7 +2850,12 @@ local function refreshInterface()
 	local money = tonumber(data.Money) or 0
 	session.startMoney = session.startMoney or money
 
-	-- Nothing on the home page can be seen, so skip the work.
+	-- The log stays current on every page, so nothing is missing when Home opens.
+	for index, line in ipairs(ui.activity) do
+		setText(line, activity[index] or "")
+	end
+
+	-- Nothing else on the home page can be seen, so skip the work.
 	if not ui.homeShown then
 		return
 	end
@@ -2725,10 +2949,6 @@ local function refreshInterface()
 	setText(ui.crew[1], bestPickaxe)
 	setText(ui.crew[2], string.format("%d / %d", miners, tonumber(mineGame.MinerSlots) or 0))
 	setText(ui.crew[3], tostring(mineGame.TapLevel or 1))
-
-	for index, line in ipairs(ui.activity) do
-		setText(line, activity[index] or "")
-	end
 end
 
 ---Show a short message on the settings page.
@@ -3291,6 +3511,10 @@ local function createInterface()
 			elseif group.custom == "sell" then
 				addDropdown(box, "Rarities to sell", RARITIES, "sellRarities")
 				addDropdown(box, "Items to sell", SELL_TYPES, "sellTypes")
+			elseif group.custom == "mutate" then
+				addDropdown(box, "Target", MUTATION_TARGETS, "mutateTarget", true)
+				addDropdown(box, "Roll on", MUTATE_MODES, "mutateMode", true)
+				addSlider(box, "mutateSpend", "Spend limit", MUTATE_SPEND_RANGE, "% of cash")
 			elseif group.custom == "index" then
 				addSlider(box, "indexLimit", "Time limit per area", INDEX_LIMIT_RANGE, "min")
 			end
@@ -3524,10 +3748,19 @@ function AutoFarm.init()
 
 	-- The server only answers Buff Mode status through this shared event.
 	uiConnections[#uiConnections + 1] = replicatedStorage.Remotes.MineFX.OnClientEvent:Connect(function(message)
-		if type(message) == "table" and message.t == "buffmode" then
+		if type(message) ~= "table" then
+			return
+		end
+
+		if message.t == "buffmode" then
 			buffMember = message.member == true
+		elseif message.t == "mutation" and message.plot == localPlayer:GetAttribute("MinePlotIndex") then
+			-- Every player's rolls arrive here, so the plot number picks out our own.
+			mutationReply = message
 		end
 	end)
+
+	spawnLoop("Mutate", MUTATE_INTERVAL, rollMutation)
 
 	spawnLoop("Extras", EXTRAS_INTERVAL, runExtras)
 	spawnLoop("Economy", CYCLE_INTERVAL, runCycle)
