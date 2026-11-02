@@ -19,6 +19,7 @@ local AutoFarm = {
 		AutoTrialClaim = false,
 		AutoFocus = false,
 		AutoBigNode = false,
+		AutoAnnex = false,
 	},
 	settings = {
 		theme = "Graphite",
@@ -66,6 +67,7 @@ local SELL_TYPES = { "Ores", "Miners", "Pickaxes" }
 local STAND_OFFSET = Vector3.new(0, 3, 6)
 local HOP_SETTLES = { 0.12, 0.2, 0.35 }
 local SALE_CONFIRM_TIME = 0.8
+local ANNEX_HOP_SETTLE = 0.35
 local MIN_SELL_WORTH = 1000
 local CREW_STATS = { false, "Speed", "MineSpeed" }
 
@@ -287,6 +289,7 @@ local PAGES = {
 					{ "AutoCore", "Auto Core Upgrades", "Buys tap damage and miner slots." },
 					{ "AutoSkills", "Auto Area Upgrades", "Buys research in unlocked zones." },
 					{ "AutoZones", "Auto Unlock Zones", "Saves for and unlocks the next zone." },
+					{ "AutoAnnex", "Auto Expand Plot", "Buys the plot expansion and opens its pads." },
 				},
 			},
 		},
@@ -1218,6 +1221,56 @@ local function setBigNode(mineGame)
 	end
 end
 
+---Hop to a plot prompt and trigger it. These prompts are handled by the server, with no event to send.
+---@param holder Instance?
+---@param key string
+---@param message string
+local function usePlotPrompt(holder, key, message)
+	local prompt = holder and holder:FindFirstChildWhichIsA("ProximityPrompt", true)
+
+	if not prompt or not prompt.Enabled or not isReady(key) then
+		return
+	end
+
+	cooldowns[key] = os.clock() + RETRY_COOLDOWN
+
+	local used = hopToStand(holder, function()
+		fireproximityprompt(prompt)
+	end, ANNEX_HOP_SETTLE)
+
+	if used then
+		logActivity(message)
+	end
+end
+
+---Buy the plot expansion, then open its locked pads with Slot Keys.
+---@param data table
+---@param mineGame table
+local function expandPlot(data, mineGame)
+	local plot = getPlot()
+	local annex = plot and plot:FindFirstChild("Annex")
+
+	if not annex then
+		return
+	end
+
+	if mineGame.PlotExpanded ~= true then
+		if tonumber(data.Money) and data.Money >= MineConfig.AnnexCost then
+			usePlotPrompt(annex:FindFirstChild("Gate"), "AnnexGate", "Tried to buy the plot expansion")
+		end
+
+		return
+	end
+
+	local nextPad = MineConfig.AnnexNextLocked(mineGame)
+
+	if nextPad and MineConfig.GetPotionCount(mineGame, MineConfig.AnnexKeyItem) > 0 then
+		local holders = plot:FindFirstChild("Holders")
+
+		usePlotPrompt(holders and holders:FindFirstChild("M" .. nextPad), "AnnexPad", "Used a Slot Key on pad " .. nextPad)
+	end
+end
+
 ---Run the slower reward and crew jobs.
 local function runExtras()
 	if not canAct() then
@@ -1249,6 +1302,10 @@ local function runExtras()
 
 	if toggles.AutoBigNode then
 		setBigNode(mineGame)
+	end
+
+	if toggles.AutoAnnex then
+		expandPlot(data, mineGame)
 	end
 end
 
