@@ -304,6 +304,7 @@ local httpService = game:GetService("HttpService")
 local runService = game:GetService("RunService")
 local playersService = game:GetService("Players")
 local coreGui = game:GetService("CoreGui")
+local textService = game:GetService("TextService")
 
 ---Build a font from a built-in family, falling back to Gotham.
 ---@param enumFont Enum.Font
@@ -317,6 +318,58 @@ local function getFont(enumFont, weight)
 	return success and font or Font.fromEnum(Enum.Font.Gotham)
 end
 
+-- Fonts players can pick for the body text, all built into Roblox (most are Google Fonts). Titillium Web is the design's own.
+local FONT_ORDER = {
+	"Titillium",
+	"Gotham",
+	"Builder Sans",
+	"Fredoka",
+	"Luckiest Guy",
+	"Bangers",
+	"Denk One",
+	"Oswald",
+	"Josefin Sans",
+	"Michroma",
+	"Jura",
+	"Press Start",
+	"Comic Neue",
+	"Permanent Marker",
+	"Patrick Hand",
+	"Special Elite",
+	"Merriweather",
+	"Garamond",
+	"Creepster",
+	"Indie Flower",
+}
+local FONT_ENUMS = {
+	Titillium = "TitilliumWeb",
+	Gotham = "Gotham",
+	["Builder Sans"] = "BuilderSans",
+	Fredoka = "FredokaOne",
+	["Luckiest Guy"] = "LuckiestGuy",
+	Bangers = "Bangers",
+	["Denk One"] = "DenkOne",
+	Oswald = "Oswald",
+	["Josefin Sans"] = "JosefinSans",
+	Michroma = "Michroma",
+	Jura = "Jura",
+	["Press Start"] = "Arcade",
+	["Comic Neue"] = "Cartoon",
+	["Permanent Marker"] = "PermanentMarker",
+	["Patrick Hand"] = "PatrickHand",
+	["Special Elite"] = "SpecialElite",
+	Merriweather = "Merriweather",
+	Garamond = "Garamond",
+	Creepster = "Creepster",
+	["Indie Flower"] = "IndieFlower",
+}
+local FONT_SCALE_RANGE = { 80, 125 }
+local FONT_WIDTH_CLAMP = { 0.55, 1.15 }
+local FONT_APPLY_DELAY = 0.15
+local FIXED_FONT_ATTRIBUTE = "DeepVeinFixedFont"
+local FONT_SAMPLE = "The quick brown fox jumps over the lazy dog 0123456789"
+local FONT_BODY_KINDS = { body = true, medium = true, bold = true }
+
 local FONTS = {
 	body = getFont(Enum.Font.TitilliumWeb, Enum.FontWeight.Regular),
 	medium = getFont(Enum.Font.TitilliumWeb, Enum.FontWeight.SemiBold),
@@ -325,6 +378,17 @@ local FONTS = {
 	monoBold = getFont(Enum.Font.RobotoMono, Enum.FontWeight.SemiBold),
 	display = getFont(Enum.Font.Sarpanch, Enum.FontWeight.Bold),
 }
+
+-- The design's own size factors, before any font or text size change.
+local BASE_FACTORS = table.clone(FONT_FACTORS)
+
+-- How wide each family draws, and each text's size in the design font.
+local fontWidths = {}
+local baseTextSizes = setmetatable({}, { __mode = "k" })
+
+-- The font and size scales currently applied to the window, and the latest queued change.
+local appliedFontScale, appliedTextScale = 1, 1
+local textApplyToken = 0
 
 ---Build a full theme from its source colors.
 ---@param source table
@@ -751,6 +815,8 @@ local function text(parent, value, size, kind, color, properties)
 		Parent = parent,
 	})
 
+	baseTextSizes[instance] = math.floor(size * BASE_FACTORS[kind] + 0.5)
+
 	for property, propertyValue in pairs(properties or {}) do
 		if COLOR_PROPERTIES[property] and type(propertyValue) == "string" then
 			setColor(instance, property, propertyValue)
@@ -760,6 +826,93 @@ local function text(parent, value, size, kind, color, properties)
 	end
 
 	return instance
+end
+
+---Get the font family for a picker name.
+---@param name string
+---@return string?
+local function fontFamily(name)
+	local success, family = pcall(function()
+		return Font.fromEnum(Enum.Font[FONT_ENUMS[name]]).Family
+	end)
+
+	return success and family or nil
+end
+
+---Measure how wide a family draws a sample line, so sizes can be matched.
+---@param family string
+---@return number
+local function fontWidth(family)
+	if fontWidths[family] then
+		return fontWidths[family]
+	end
+
+	local success, bounds = pcall(function()
+		local params = Instance.new("GetTextBoundsParams")
+
+		params.Text = FONT_SAMPLE
+		params.Font = Font.new(family, Enum.FontWeight.Regular)
+		params.Size = 100
+		params.Width = 100000
+
+		return textService:GetTextBoundsAsync(params)
+	end)
+
+	fontWidths[family] = success and bounds.X > 0 and bounds.X or 1
+
+	return fontWidths[family]
+end
+
+---Apply the picked font and text size to everything in the window.
+---@note: Fonts draw at different sizes for the same TextSize, so body text is scaled to the width the design font gives.
+local function applyText()
+	local family = fontFamily(Library.settings.font) or fontFamily("Titillium")
+	local designFamily = fontFamily("Titillium") or family
+	local oldFamily = FONTS.body.Family
+	local fontScale = math.clamp(fontWidth(designFamily) / fontWidth(family), FONT_WIDTH_CLAMP[1], FONT_WIDTH_CLAMP[2])
+	local textScale = math.clamp((Library.settings.fontScale or 100) / 100, FONT_SCALE_RANGE[1] / 100, FONT_SCALE_RANGE[2] / 100)
+
+	for kind, factor in pairs(BASE_FACTORS) do
+		if FONT_BODY_KINDS[kind] then
+			FONTS[kind] = Font.new(family, FONTS[kind].Weight, FONTS[kind].Style)
+			FONT_FACTORS[kind] = factor * fontScale * textScale
+		else
+			FONT_FACTORS[kind] = factor * textScale
+		end
+	end
+
+	if screenGui then
+		for _, element in ipairs(screenGui:GetDescendants()) do
+			if element:IsA("TextLabel") or element:IsA("TextButton") or element:IsA("TextBox") then
+				local body = element.FontFace.Family == oldFamily and not element:GetAttribute(FIXED_FONT_ATTRIBUTE)
+				local applied = body and appliedFontScale * appliedTextScale or appliedTextScale
+				local base = baseTextSizes[element] or element.TextSize / applied
+
+				baseTextSizes[element] = base
+
+				if body then
+					element.FontFace = Font.new(family, element.FontFace.Weight, element.FontFace.Style)
+				end
+
+				element.TextSize = math.max(1, math.floor(base * (body and fontScale or 1) * textScale + 0.5))
+			end
+		end
+	end
+
+	appliedFontScale, appliedTextScale = fontScale, textScale
+end
+
+---Apply text settings once a burst of changes, like dragging the size slider, settles.
+local function queueApplyText()
+	textApplyToken += 1
+
+	local token = textApplyToken
+
+	task.delay(FONT_APPLY_DELAY, function()
+		if token == textApplyToken then
+			applyText()
+		end
+	end)
 end
 
 ---Load the icon sheet once.
@@ -2917,9 +3070,92 @@ function Card:AddChips(tabs, options)
 	end
 
 	local inner = addBlock(self, { gap = options.gap or 12, showWhen = options.showWhen })
-	local active = 1
+	local active = math.clamp(options.startTab or 1, 1, #tabs)
 	local segmented = nil
 	local tabPaints = {}
+	local paintSummary = nil
+
+	-- With a label, the chips fold away behind a dropdown button that shows a summary.
+	if options.label then
+		local header = create("TextButton", {
+			AutoButtonColor = false,
+			BackgroundColor3 = THEME.inset,
+			LayoutOrder = 0,
+			Size = UDim2.new(1, 0, 0, 44),
+			Text = "",
+			Parent = inner,
+		})
+
+		local headerStroke = style(header, 9, THEME.edge)
+
+		text(header, options.label, 14, "body", THEME.text, {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 14, 0.5, 0),
+			Size = UDim2.new(0.55, -14, 0, textSize("body", 14)),
+		})
+
+		local summary = text(header, "", 13, "body", THEME.muted, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -40, 0.5, 0),
+			Size = UDim2.new(0.45, -40, 0, textSize("body", 13)),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		})
+
+		local chevron = icon(header, "chevron-down", 16, THEME.muted, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -14, 0.5, 0),
+		})
+
+		local body = create("Frame", {
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			LayoutOrder = 1,
+			Size = UDim2.new(1, 0, 0, 0),
+			Visible = options.open == true,
+			Parent = inner,
+		})
+
+		list(body, options.gap or 12)
+		addPress(header, 0.99)
+
+		---Show or hide the chips.
+		---@param open boolean
+		local function setOpen(open)
+			body.Visible = open
+			tween(chevron, { Rotation = open and 180 or 0 }, 0.18)
+			fadeColor(headerStroke, "Color", open and THEME.edgeStrong or THEME.edge, 0.18)
+		end
+
+		header.MouseButton1Click:Connect(function()
+			setOpen(not body.Visible)
+		end)
+
+		paintSummary = function()
+			local value
+
+			if options.summary then
+				value = options.summary()
+			else
+				local picked = 0
+
+				for _, tab in ipairs(tabs) do
+					if tab.single then
+						value = tostring(Library.settings[tab.key])
+					else
+						for _, option in ipairs(tab.choices) do
+							picked += Library.settings[tab.key][option] and 1 or 0
+						end
+					end
+				end
+
+				value = value or (picked == 0 and "None picked" or string.format("%d picked", picked))
+			end
+
+			setText(summary, value or "")
+		end
+
+		inner = body
+	end
 
 	---Count picked options in a tab.
 	---@param tab table
@@ -2969,7 +3205,7 @@ function Card:AddChips(tabs, options)
 			BackgroundTransparency = 1,
 			LayoutOrder = index + 1,
 			Size = UDim2.new(1, 0, 0, 0),
-			Visible = index == 1,
+			Visible = index == active,
 			Parent = inner,
 		})
 
@@ -3010,6 +3246,27 @@ function Card:AddChips(tabs, options)
 				Position = UDim2.new(0, 31, 0.5, 0),
 				Size = UDim2.new(1, -60, 0, textSize("body", 13)),
 			})
+
+			-- A preview font shows the option in itself and keeps it through font changes.
+			if tab.fonts and tab.fonts[option] then
+				local preview = tab.fonts[option]
+
+				name.FontFace = preview
+				name:SetAttribute(FIXED_FONT_ATTRIBUTE, true)
+
+				-- Measuring yields, so each preview is sized to the design font's width in the background.
+				task.spawn(function()
+					local designFamily = fontFamily("Titillium") or preview.Family
+					local ratio = math.clamp(
+						fontWidth(designFamily) / fontWidth(preview.Family),
+						FONT_WIDTH_CLAMP[1],
+						FONT_WIDTH_CLAMP[2]
+					)
+
+					baseTextSizes[name] = math.floor(13 * BASE_FACTORS.body * ratio + 0.5)
+					name.TextSize = math.max(1, math.floor(baseTextSizes[name] * appliedTextScale + 0.5))
+				end)
+			end
 
 			local check = icon(chip, "check", 14, THEME.accent, {
 				AnchorPoint = Vector2.new(1, 0.5),
@@ -3065,6 +3322,10 @@ function Card:AddChips(tabs, options)
 					segmented.paint()
 				end
 
+				if paintSummary then
+					paintSummary()
+				end
+
 				safeCall(tab.key, tab.callback, Library.settings[tab.key])
 			end)
 		end
@@ -3105,6 +3366,10 @@ function Card:AddChips(tabs, options)
 				segmented.paint()
 			end
 
+			if paintSummary then
+				paintSummary()
+			end
+
 			safeCall(tab.key, tab.callback, selection)
 		end
 
@@ -3125,6 +3390,10 @@ function Card:AddChips(tabs, options)
 
 		if segmented then
 			segmented.paint()
+		end
+
+		if paintSummary then
+			paintSummary()
 		end
 	end
 
@@ -4674,6 +4943,16 @@ local function applyConfig(saved)
 		settings.look = savedSettings.look
 	end
 
+	if FONT_ENUMS[savedSettings.font] then
+		settings.font = savedSettings.font
+	end
+
+	if type(savedSettings.fontScale) == "number" then
+		settings.fontScale = math.clamp(savedSettings.fontScale, FONT_SCALE_RANGE[1], FONT_SCALE_RANGE[2])
+	end
+
+	queueApplyText()
+
 	if type(savedSettings.key) == "string" and pcall(function()
 		return Enum.KeyCode[savedSettings.key]
 	end) then
@@ -4989,6 +5268,28 @@ local function buildSettings(window)
 	ui.lookControl = look:AddSegmented("look", nil, LOOK_ORDER, Library.settings.look, function()
 		applyAppearance()
 	end)
+
+	local fontCard = row:AddCard("Font", 1, { id = "DeepVein/Font" })
+
+	local previews = {}
+
+	for _, name in ipairs(FONT_ORDER) do
+		previews[name] = Font.new(fontFamily(name) or FONTS.body.Family)
+	end
+
+	fontCard:AddChips({
+		{
+			name = "Font",
+			key = "font",
+			choices = FONT_ORDER,
+			single = true,
+			fonts = previews,
+			callback = queueApplyText,
+		},
+	}, { label = "Font", columns = 2 })
+	fontCard:AddSlider("fontScale", "Text size", FONT_SCALE_RANGE, "%", 100, queueApplyText, {
+		ticks = { "80%", "100%", "125%" },
+	})
 
 	local windowCard = row:AddCard("Window", 1, { id = "DeepVein/Window" })
 	local keyRow = settingsRow(windowCard, "Hide key")
@@ -5962,6 +6263,10 @@ end
 ---@return string?
 function Window:Ready()
 	buildSettings(self)
+
+	if Library.settings.font ~= "Titillium" or Library.settings.fontScale ~= 100 then
+		queueApplyText()
+	end
 	defaultLayout = captureLayout()
 
 	local saved = readJson(paths.layout)
@@ -6049,6 +6354,8 @@ function Library.new(options)
 		or (THEMES[options.theme] and options.theme or "Obsidian")
 	settings.look = LOOKS[settings.look] and settings.look or (LOOKS[options.look] and options.look or "Soft")
 	settings.key = type(settings.key) == "string" and settings.key or options.key or "RightShift"
+	settings.font = FONT_ENUMS[settings.font] and settings.font or "Titillium"
+	settings.fontScale = type(settings.fontScale) == "number" and settings.fontScale or 100
 	settings.width = DEFAULT_SIZE.X
 	settings.height = DEFAULT_SIZE.Y
 	Library.running = true
@@ -6066,6 +6373,9 @@ Library.fadeColor = fadeColor
 Library.caps = caps
 Library.theme = THEME
 Library.fonts = FONTS
+
+-- Re-apply Library.settings.font and Library.settings.fontScale after a script changes them.
+Library.applyText = queueApplyText
 
 ---Get a theme color as a hex string, for rich text.
 ---@param token string
