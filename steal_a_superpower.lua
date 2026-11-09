@@ -17,6 +17,13 @@ local AutoFarm = {
 		InstaKillBosses = false,
 		ServerHop = false,
 		FastRespawn = false,
+		DungeonFarm = false,
+		DungeonStop = false,
+		AutoDungeonBuy = false,
+		UseAbilities = false,
+		WebhookCards = false,
+		WebhookDungeon = false,
+		WebhookPing = false,
 	},
 	settings = {
 		theme = "Obsidian",
@@ -33,6 +40,11 @@ local AutoFarm = {
 		floatHeight = 8,
 		targetDistance = 30,
 		respawnEvery = 45,
+		dungeonStopFloor = 10,
+		dungeonAfter = "Run again",
+		dungeonKeep = 5,
+		webhookUrl = "",
+		webhookRarities = {},
 	},
 }
 
@@ -86,6 +98,17 @@ local CHART_BARS = 12
 local CONFIG_FOLDER = "StealASuperpower"
 local POTION_TIERS = { "I", "II", "III" }
 local BENCH_UPGRADE = "Training Bench"
+local DUNGEON_ENTRY_STEP = 8
+local DUNGEON_PAD_HEIGHT = 3
+local DUNGEON_LEAVE_RETRY = 3
+local DUNGEON_BUY_RETRY = 30
+local DUNGEON_AFTER = { "Run again", "Stop farming" }
+local DUNGEON_TABS = { "Common", "Rare", "Epic", "Legendary", "Mythic" }
+local ABILITY_INTERVAL = 0.25
+local WEBHOOK_GAP = 2
+local WEBHOOK_NAME = "Superpower Farm"
+local WEBHOOK_DUNGEON_WON = 0xF2C14E
+local WEBHOOK_DUNGEON_LOST = 0xE5484D
 local BOSS_UP_COLOR = Color3.fromRGB(107, 211, 138)
 local BOSS_WAIT_COLOR = Color3.fromRGB(167, 174, 184)
 
@@ -2884,12 +2907,37 @@ function Card:AddSlider(key, title, range, suffix, default, callback, options)
 		Size = UDim2.new(1, -150, 0, labelSize),
 	})
 
-	local value = text(box, "", 14, "monoBold", THEME.text, {
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -14, 0, 12),
-		Size = UDim2.new(0, 140, 0, labelSize),
-		TextXAlignment = Enum.TextXAlignment.Right,
-	})
+	local value = nil
+
+	if options.input then
+		-- A typeable value box, for numbers too fine to hit by dragging.
+		local valueSize = textSize("monoBold", 14)
+
+		value = create("TextBox", {
+			AnchorPoint = Vector2.new(1, 0),
+			BackgroundColor3 = THEME.deep,
+			ClearTextOnFocus = false,
+			FontFace = FONTS.monoBold,
+			Position = UDim2.new(1, -10, 0, 7),
+			Size = UDim2.new(0, 110, 0, labelSize + 10),
+			Text = "",
+			TextColor3 = THEME.text,
+			TextSize = valueSize,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = box,
+		})
+
+		baseTextSizes[value] = math.floor(14 * BASE_FACTORS.monoBold + 0.5)
+		style(value, 7, THEME.buttonEdge)
+		pad(value, 0, 8)
+	else
+		value = text(box, "", 14, "monoBold", THEME.text, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -14, 0, 12),
+			Size = UDim2.new(0, 140, 0, labelSize),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		})
+	end
 
 	local area = create("Frame", {
 		BackgroundTransparency = 1,
@@ -2953,10 +3001,14 @@ function Card:AddSlider(key, title, range, suffix, default, callback, options)
 			return
 		end
 
-		local alpha = (current - range[1]) / math.max(range[2] - range[1], 1)
+		local alpha = math.clamp((current - range[1]) / math.max(range[2] - range[1], 1), 0, 1)
 
 		shown = current
-		value.Text = suffix and string.format("%d %s", current, suffix) or tostring(current)
+
+		if not (value:IsA("TextBox") and value:IsFocused()) then
+			value.Text = suffix and string.format("%d %s", current, suffix) or tostring(current)
+		end
+
 		tween(fill, { Size = UDim2.fromScale(alpha, 1) }, 0.12)
 		tween(knob, { Position = UDim2.fromScale(alpha, 0.5) }, 0.12)
 	end
@@ -2972,6 +3024,29 @@ function Card:AddSlider(key, title, range, suffix, default, callback, options)
 			paint()
 			safeCall(key, callback, new)
 		end
+	end
+
+	if value:IsA("TextBox") then
+		value.Focused:Connect(function()
+			value.Text = tostring(Library.settings[key])
+		end)
+
+		value.FocusLost:Connect(function()
+			local typed = tonumber(string.match(value.Text, "%-?%d+"))
+
+			shown = nil
+
+			if typed then
+				local new = math.clamp(math.floor(typed), range[1], range[2])
+
+				if new ~= Library.settings[key] then
+					Library.settings[key] = new
+					safeCall(key, callback, new)
+				end
+			end
+
+			paint()
+		end)
 	end
 
 	local hit = create("TextButton", {
@@ -6382,6 +6457,11 @@ local Daily = require(Shared.Rules.Daily)
 local ForeverPack = require(Shared.Rules.ForeverPack)
 local CardIndex = require(Shared.Rules.CardIndex)
 local Format = require(Shared.Util.Format)
+local DungeonConfig = require(Shared.Config.DungeonConfig)
+local Windows = require(Client.UI.Kit.Windows)
+local CardConfig = require(Shared.Config.CardConfig)
+local CollectionService = game:GetService("CollectionService")
+local TrinketConfig = require(Shared.Config.TrinketConfig)
 
 -- Local player.
 local localPlayer = playersService.LocalPlayer
@@ -6435,6 +6515,26 @@ local brain = {
 	lastInstaKill = 0,
 	holdArena = nil,
 }
+
+-- Dungeon run state.
+local dungeon = {
+	leavingAt = 0,
+	stopRequested = false,
+	runs = 0,
+	banked = 0,
+	lastEnd = "—",
+	startedAt = 0,
+	kills = 0,
+}
+
+-- Webhook messages waiting to send, oldest first.
+local webhookQueue = {}
+
+-- The game's own ability function, found once in the garbage collector.
+local gameUseAbility = nil
+
+-- Dungeon shop chip name to offer id, by chip tab key.
+local dungeonOfferIds = {}
 
 -- Next allowed time for each action key.
 local cooldowns = {}
@@ -6762,8 +6862,9 @@ end
 
 ---Pick a spot a little above the ground beside the enemy, on the arena side, inside our attack range.
 ---@param model Model
+---@param arenaOverride table? a box to use instead of the model's pad arena
 ---@return CFrame?, table?
-local function hoverFor(model)
+local function hoverFor(model, arenaOverride)
 	local enemyRoot = model:FindFirstChild("HumanoidRootPart")
 	if not enemyRoot then
 		return nil, nil
@@ -6773,10 +6874,10 @@ local function hoverFor(model)
 	local distance = math.clamp(AutoFarm.settings.targetDistance or 30, MIN_TARGET_DISTANCE, reach)
 	local height = AutoFarm.settings.floatHeight or 8
 	local arenaCFrame, arenaSize = arenaOf(model)
-	local arena = arenaCFrame and { cframe = arenaCFrame, size = arenaSize }
+	local arena = arenaOverride or arenaCFrame and { cframe = arenaCFrame, size = arenaSize }
 
 	-- Standing toward the arena's middle keeps walls from coming between us and the target.
-	local center = arenaCFrame and arenaCFrame.Position or enemyRoot.Position + Vector3.new(1, 0, 0)
+	local center = arena and arena.cframe.Position or enemyRoot.Position + Vector3.new(1, 0, 0)
 	local flat = (center - enemyRoot.Position) * Vector3.new(1, 0, 1)
 	local direction = flat.Magnitude > 1 and flat.Unit or Vector3.new(1, 0, 0)
 	local position = clampToArena(enemyRoot.Position + direction * distance + Vector3.new(0, height, 0), arena)
@@ -7322,6 +7423,536 @@ local function setMode(mode, target)
 	session.target = target or session.target
 end
 
+---Get the executor's HTTP request function.
+---@return function?
+local function httpRequest()
+	return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
+---Check that a webhook URL looks usable.
+---@param url any
+---@return boolean
+local function validWebhook(url)
+	return type(url) == "string" and string.match(url, "^https?://[%w%.%-:]+/") ~= nil
+end
+
+---Queue a Discord embed for the webhook.
+---@param embed table
+---@param ping boolean?
+local function queueWebhook(embed, ping)
+	if not validWebhook(AutoFarm.settings.webhookUrl) then
+		return
+	end
+
+	embed.footer = { text = string.format("%s · %s", WEBHOOK_NAME, localPlayer.Name) }
+	embed.timestamp = DateTime.now():ToIsoDate()
+
+	webhookQueue[#webhookQueue + 1] = {
+		username = WEBHOOK_NAME,
+		content = ping and AutoFarm.toggles.WebhookPing and "@everyone" or nil,
+		embeds = { embed },
+	}
+end
+
+---Send the oldest queued webhook message.
+---@note: Discord rate limits webhooks, so the loop sends one message per WEBHOOK_GAP seconds.
+local function webhookStep()
+	local message = table.remove(webhookQueue, 1)
+	if not message then
+		return
+	end
+
+	local send = httpRequest()
+	if not send then
+		logActivity("This executor can't send web requests", "dangerText")
+		table.clear(webhookQueue)
+		return
+	end
+
+	local success, response = pcall(send, {
+		Url = AutoFarm.settings.webhookUrl,
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = httpService:JSONEncode(message),
+	})
+
+	local status = success and type(response) == "table" and tonumber(response.StatusCode) or 0
+
+	if status < 200 or status >= 300 then
+		logActivity(string.format("Webhook failed (%s)", success and tostring(status) or tostring(response)), "dangerText")
+	end
+end
+
+---Send the cards from a pack open that match the picked rarities.
+---@param packId string
+---@param cardIds table
+local function webhookCards(packId, cardIds)
+	if not AutoFarm.toggles.WebhookCards then
+		return
+	end
+
+	local picked = AutoFarm.settings.webhookRarities or {}
+	local lines, color, bestRank = {}, nil, 0
+
+	for _, cardId in ipairs(cardIds) do
+		local card = CardConfig.ById[cardId]
+
+		if card and picked[card.Rarity] then
+			local rank = CardConfig.RarityRank[card.Rarity] or 0
+
+			lines[#lines + 1] = string.format("%s **%s** · %s", card.Icon or "", card.Name, card.Rarity)
+
+			if rank > bestRank and typeof(card.Color) == "Color3" then
+				bestRank, color = rank, tonumber(card.Color:ToHex(), 16)
+			end
+		end
+	end
+
+	if #lines == 0 then
+		return
+	end
+
+	queueWebhook({
+		title = string.format("Pulled from %s pack", packId),
+		description = table.concat(lines, "\n"),
+		color = color,
+	}, true)
+end
+
+---Send the stats of a finished dungeon run.
+---@param result table the game's End event table
+---@param stopped boolean whether the script ended the run at the stop floor
+local function webhookDungeon(result, stopped)
+	if not AutoFarm.toggles.WebhookDungeon then
+		return
+	end
+
+	local data = getData() or {}
+	local elapsed = dungeon.startedAt > 0 and os.clock() - dungeon.startedAt or 0
+	local reason = stopped and "Stopped at the stop floor" or tostring(result.Reason or "Ended")
+
+	queueWebhook({
+		title = string.format("Dungeon run ended · Floor %s", tostring(result.Floor)),
+		color = result.Won and WEBHOOK_DUNGEON_WON or WEBHOOK_DUNGEON_LOST,
+		fields = {
+			{ name = "Why", value = reason, inline = true },
+			{ name = "Floor reached", value = tostring(result.Floor or 0), inline = true },
+			{ name = "Best floor", value = tostring(result.Best or data.DungeonBest or 0), inline = true },
+			{ name = "Tokens banked", value = "+" .. tostring(result.Banked or 0), inline = true },
+			{ name = "Tokens lost", value = tostring(result.Lost or 0), inline = true },
+			{ name = "Tokens now", value = tostring(data.DungeonTokens or 0), inline = true },
+			{ name = "Kills", value = tostring(dungeon.kills), inline = true },
+			{ name = "Run time", value = elapsed > 0 and string.format("%dm %02ds", elapsed // 60, elapsed // 1 % 60) or "—", inline = true },
+			{ name = "Runs this session", value = tostring(dungeon.runs), inline = true },
+		},
+	})
+end
+
+---Find the game's local ability function, which runs its own cooldown, aim and animation checks.
+---@note: The ability controller keeps it as a local, so the GC is the only way to reach it.
+---@return function?
+local function findUseAbility()
+	if gameUseAbility or not getgc then
+		return gameUseAbility
+	end
+
+	for _, value in ipairs(getgc(false)) do
+		if type(value) == "function" and islclosure(value) and debug.info(value, "n") == "use" then
+			local source = debug.info(value, "s")
+
+			if source and string.find(source, "AbilityController", 1, true) then
+				gameUseAbility = value
+				break
+			end
+		end
+	end
+
+	return gameUseAbility
+end
+
+---Get the nearest living enemy within a range.
+---@param position Vector3
+---@param range number
+---@return BasePart?
+local function nearestEnemyRoot(position, range)
+	local best, bestDistance = nil, range
+
+	for _, model in ipairs(CollectionService:GetTagged(EnemyConfig.Tag)) do
+		local root = model:FindFirstChild("HumanoidRootPart")
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+		if root and humanoid and humanoid.Health > 0 and not model:GetAttribute("Dead") and not model:GetAttribute("DeadLocal") then
+			local distance = ((root.Position - position) * Vector3.new(1, 0, 1)).Magnitude
+
+			if distance <= bestDistance then
+				best, bestDistance = root, distance
+			end
+		end
+	end
+
+	return best
+end
+
+---Cast every ready card ability at the nearest enemy in its range.
+local function abilityStep()
+	if not AutoFarm.toggles.UseAbilities or isLifting() then
+		return
+	end
+
+	local data = getData()
+	local _, rootPart = getBody()
+	local use = findUseAbility()
+
+	if not data or not rootPart or not use then
+		return
+	end
+
+	local success, loadout = pcall(AbilityConfig.Loadout, data)
+	if not success or type(loadout) ~= "table" then
+		return
+	end
+
+	for _, entry in ipairs(loadout) do
+		local ability = AbilityConfig.Get(entry.Id)
+		local scaled, scaling = pcall(AbilityScaling.FromData, data, entry.Card, entry.Id)
+		local range = ability and (ability.Range or 10) * (scaled and scaling and scaling.Size or 1)
+		local target = range and nearestEnemyRoot(rootPart.Position, range)
+
+		if target then
+			-- The game skips abilities that are cooling down, so calling every tick is safe.
+			pcall(use, entry, true, true, target.Position)
+		end
+	end
+end
+
+---Get the dungeon run we are in.
+---@return any?
+local function dungeonRun()
+	return localPlayer:GetAttribute("DungeonRun")
+end
+
+---Get the room model for a floor of a run.
+---@param run any
+---@param floor number
+---@return Model?
+local function dungeonRoom(run, floor)
+	local maps = workspace:FindFirstChild("DungeonMaps")
+	return maps and maps:FindFirstChild(string.format("Run%s_Floor%d", tostring(run), floor))
+end
+
+---Get a room's walkable box.
+---@param room Model
+---@return table?
+local function dungeonArena(room)
+	local bounds = room:FindFirstChild("Bounds")
+	return bounds and bounds:IsA("BasePart") and { cframe = bounds.CFrame, size = bounds.Size } or nil
+end
+
+---Get the living enemies of a dungeon run, nearest first.
+---@param run any
+---@param rootPart BasePart
+---@return Model[]
+local function dungeonEnemies(run, rootPart)
+	local folder = workspace:FindFirstChild("Enemies")
+	local found = {}
+
+	for _, model in ipairs(folder and folder:GetChildren() or {}) do
+		local root = model:FindFirstChild("HumanoidRootPart")
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+		if root and humanoid and humanoid.Health > 0 and model:GetAttribute("Dungeon") == run then
+			found[#found + 1] = model
+		end
+	end
+
+	table.sort(found, function(first, second)
+		return (first.HumanoidRootPart.Position - rootPart.Position).Magnitude
+			< (second.HumanoidRootPart.Position - rootPart.Position).Magnitude
+	end)
+
+	return found
+end
+
+---Get the floor the farm should stop after, or nil when it never stops.
+---@return number?
+local function dungeonStopFloor()
+	if not AutoFarm.toggles.DungeonStop then
+		return nil
+	end
+
+	return math.max(1, math.floor(AutoFarm.settings.dungeonStopFloor or 10))
+end
+
+---End the run by resetting, which banks nothing new but keeps every checkpoint.
+---@note: The server has no leave request and pulls you back if you teleport out, so dying is the only way out.
+local function leaveDungeon()
+	if os.clock() - dungeon.leavingAt < DUNGEON_LEAVE_RETRY then
+		return
+	end
+
+	local humanoid = getBody()
+
+	if humanoid then
+		dungeon.leavingAt = os.clock()
+		dungeon.stopRequested = true
+		holdAt(nil)
+		humanoid.Health = 0
+	end
+end
+
+---Stand on the portal pad until the queue timer starts the run.
+---@return boolean handled
+local function queueDungeon()
+	local portal = workspace:FindFirstChild("DungeonPortal")
+	local pad = portal and portal:FindFirstChild("Pad")
+	local center = pad and (pad:FindFirstChild("Center") or pad:FindFirstChildWhichIsA("BasePart"))
+
+	if not center then
+		setMode("Dungeon farm", "No portal in this world")
+		holdAt(nil)
+		return false
+	end
+
+	local startsAt = portal:GetAttribute("StartsAt")
+	local left = type(startsAt) == "number" and math.max(0, startsAt - workspace:GetServerTimeNow())
+
+	stopLift()
+	setMode("Dungeon queue", left and string.format("Starts in %ds", math.ceil(left)) or "Waiting on pad")
+	holdAt(CFrame.new(center.Position + Vector3.new(0, DUNGEON_PAD_HEIGHT, 0)))
+
+	return true
+end
+
+---Close every open game window, because the game's auto attack pauses while any is open.
+---@note: The run results and Rebirth windows stayed open between runs and stopped every attack.
+local function closeGameWindows()
+	if not Windows.AnyOpen() then
+		return
+	end
+
+	local names = {}
+
+	if getupvalues then
+		for _, value in ipairs(getupvalues(Windows.AnyOpen)) do
+			if type(value) == "table" then
+				for name, entry in pairs(value) do
+					if type(entry) == "table" and entry.Open then
+						names[#names + 1] = name
+					end
+				end
+			end
+		end
+	end
+
+	if #names == 0 then
+		names = { "DungeonResults", "Rebirth" }
+	end
+
+	for _, name in ipairs(names) do
+		pcall(Windows.Close, name)
+	end
+end
+
+---Fight through the rooms of the current run.
+---@param run any
+---@param rootPart BasePart
+local function fightDungeon(run, rootPart)
+	local floor = tonumber(localPlayer:GetAttribute("DungeonFloor")) or 1
+	local fighting = localPlayer:GetAttribute("DungeonFight") == true
+	local stopFloor = dungeonStopFloor()
+	local label = string.format("Floor %d%s", floor, DungeonConfig.IsBossFloor(floor) and " · Boss" or "")
+
+	if localPlayer:GetAttribute("Downed") then
+		setMode("Downed", label)
+		holdAt(nil)
+		return
+	end
+
+	-- The stop floor is cleared once the server moves us past it. Leave before the next room starts.
+	if stopFloor and floor > stopFloor and not fighting then
+		setMode("Leaving dungeon", string.format("Cleared floor %d", stopFloor))
+		leaveDungeon()
+		return
+	end
+
+	local room = dungeonRoom(run, floor)
+	if not room then
+		setMode("Dungeon farm", label)
+		return
+	end
+
+	local arena = dungeonArena(room)
+
+	if fighting then
+		closeGameWindows()
+
+		local target = dungeonEnemies(run, rootPart)[1]
+
+		setMode("Dungeon farm", label)
+
+		if target then
+			holdAt(hoverFor(target, arena))
+		elseif arena then
+			-- Between waves: wait in the middle so the next wave spawns around us.
+			holdAt(CFrame.new(arena.cframe.Position.X, rootPart.Position.Y, arena.cframe.Position.Z), arena)
+		end
+
+		return
+	end
+
+	-- Walking through the entry starts the room's fight.
+	local entry = room:FindFirstChild("Entry")
+
+	if entry and arena then
+		local inward = (arena.cframe.Position - entry.Position) * Vector3.new(1, 0, 1)
+		local direction = inward.Magnitude > 1 and inward.Unit or Vector3.new(0, 0, 1)
+
+		setMode("Next room", label)
+		holdAt(CFrame.new(entry.Position + direction * DUNGEON_ENTRY_STEP))
+	end
+end
+
+---Run the dungeon part of the brain.
+---@param rootPart BasePart
+---@return boolean handled
+local function dungeonStep(rootPart)
+	local run = dungeonRun()
+
+	if run ~= nil then
+		if AutoFarm.toggles.DungeonFarm then
+			stopLift()
+			fightDungeon(run, rootPart)
+		else
+			-- Other farms would teleport away, and the server pulls us straight back.
+			setMode("In dungeon", "Dungeon farm is off")
+			holdAt(nil)
+		end
+
+		return true
+	end
+
+	if not AutoFarm.toggles.DungeonFarm then
+		return false
+	end
+
+	return queueDungeon()
+end
+
+---Handle the dungeon remote's events.
+---@param event string
+---@vararg any
+local function onDungeonEvent(event, ...)
+	if event == "Start" then
+		dungeon.startedAt = os.clock()
+		dungeon.kills = 0
+	elseif event == "Kill" then
+		dungeon.kills += 1
+	elseif event == "Checkpoint" then
+		local floor, banked = ...
+
+		logActivity(string.format("Dungeon checkpoint on floor %s, banked %s", tostring(floor), tostring(banked)), "gold")
+	elseif event == "End" then
+		local result = ...
+		if type(result) ~= "table" then
+			return
+		end
+
+		dungeon.runs += 1
+		dungeon.banked += tonumber(result.Banked) or 0
+		dungeon.lastEnd = string.format("Floor %s · +%s", tostring(result.Floor), tostring(result.Banked))
+		logActivity(
+			string.format("Dungeon ended on floor %s: +%s tokens, lost %s", tostring(result.Floor), tostring(result.Banked), tostring(result.Lost or 0)),
+			result.Won and "gold" or "dangerText"
+		)
+
+		webhookDungeon(result, dungeon.stopRequested)
+
+		if dungeon.stopRequested and AutoFarm.settings.dungeonAfter == "Stop farming" and window then
+			window:SetToggle("DungeonFarm", false)
+		end
+
+		dungeon.stopRequested = false
+	end
+end
+
+---Buy the picked dungeon shop items, up to the keep amount of each.
+---@param data table
+local function buyDungeonItems(data)
+	local keep = math.max(1, math.floor(AutoFarm.settings.dungeonKeep or 5))
+
+	for tabKey, ids in pairs(dungeonOfferIds) do
+		local picked = AutoFarm.settings[tabKey] or {}
+
+		for name, offerId in pairs(ids) do
+			local key = "dungeonBuy" .. offerId
+			local owned = type(data.Backpack) == "table" and tonumber(data.Backpack[offerId]) or 0
+
+			if picked[name] and owned < keep and isReady(key) and DungeonConfig.CanBuy(data, offerId) then
+				local tokens = tonumber(data.DungeonTokens) or 0
+
+				invoke("DungeonBuy", offerId)
+				task.wait(REPLY_WAIT)
+
+				local after = getData()
+
+				if after and (tonumber(after.DungeonTokens) or 0) < tokens then
+					logActivity("Bought " .. name .. " with dungeon tokens", "accent")
+				else
+					logActivity("Dungeon shop refused " .. name, "dangerText")
+					backOff(key, DUNGEON_BUY_RETRY)
+				end
+
+				data = after or data
+			end
+		end
+	end
+end
+
+---Build the dungeon shop chip tabs from the game's offer list.
+---@return table[]
+local function dungeonShopChoices()
+	local tabs = { { name = "Potions", key = "dungeonBuyPotions", choices = {} } }
+	local byKey = { dungeonBuyPotions = tabs[1] }
+
+	for _, rarity in ipairs(DUNGEON_TABS) do
+		local tab = { name = rarity, key = "dungeonBuy" .. rarity, choices = {} }
+
+		tabs[#tabs + 1] = tab
+		byKey[tab.key] = tab
+	end
+
+	for _, offer in ipairs(DungeonConfig.Offers()) do
+		local tab, name = nil, nil
+
+		if offer.Kind == "Potion" then
+			tab = byKey.dungeonBuyPotions
+			name = string.format("%s %s", offer.Potion.Type.Name, offer.Potion.Tier.Numeral or offer.Potion.Tier.Tier)
+		elseif offer.Kind == "Trinket" then
+			tab = byKey["dungeonBuy" .. offer.Trinket.Rarity]
+			name = offer.Trinket.Name
+		end
+
+		if tab then
+			local ids = dungeonOfferIds[tab.key] or {}
+
+			-- A few trinkets share a name inside a rarity, so add the stat to tell them apart.
+			if ids[name] then
+				name = string.format("%s (%s)", name, offer.Trinket and offer.Trinket.Stat or offer.Id)
+			end
+
+			if offer.Floor > 0 then
+				name = string.format("%s · F%d", name, offer.Floor)
+			end
+
+			ids[name] = offer.Id
+			dungeonOfferIds[tab.key] = ids
+			tab.choices[#tab.choices + 1] = name
+		end
+	end
+
+	return tabs
+end
+
 ---Decide what the character does this tick.
 local function brainStep()
 	local _, rootPart = getBody()
@@ -7335,8 +7966,11 @@ local function brainStep()
 	local carrying = carriedPacks()
 	local capacity = tonumber(localPlayer:GetAttribute("CarryCapacity")) or 5
 
-	if brain.bankAfter and os.clock() >= brain.bankAfter
-		or AutoFarm.toggles.AutoBank and carrying >= capacity and not brain.bankStartedAt then
+	-- Nothing can leave a dungeon run, so banking waits until it ends.
+	local inDungeon = dungeonRun() ~= nil
+
+	if not inDungeon and (brain.bankAfter and os.clock() >= brain.bankAfter
+		or AutoFarm.toggles.AutoBank and carrying >= capacity and not brain.bankStartedAt) then
 		brain.bankAfter = nil
 		brain.bankStartedAt = os.clock()
 		setMode("Banking packs", carrying .. " packs")
@@ -7345,7 +7979,7 @@ local function brainStep()
 	end
 
 	-- Dropped packs are still flying to us, so stay put until they land.
-	if brain.bankAfter then
+	if brain.bankAfter and not inDungeon then
 		setMode("Collecting packs", carrying .. " packs")
 		return
 	end
@@ -7360,6 +7994,10 @@ local function brainStep()
 		else
 			return
 		end
+	end
+
+	if dungeonStep(rootPart) then
+		return
 	end
 
 	-- Base errands run between fights.
@@ -7659,6 +8297,10 @@ local function economyStep()
 	if toggles.AutoRebirth and getData() then
 		tryRebirth(getData())
 	end
+
+	if toggles.AutoDungeonBuy and getData() then
+		buyDungeonItems(getData())
+	end
 end
 
 ---Open the selected packs without the opening animation.
@@ -7679,6 +8321,7 @@ local function openPacks(data)
 				session.packsOpened += amount
 				logActivity(string.format("Opened %d %s pack%s", amount, packId, amount == 1 and "" or "s"), "gold")
 				fire("PackRevealDone")
+				webhookCards(packId, result)
 			else
 				backOff(key, RETRY_COOLDOWN)
 			end
@@ -7923,7 +8566,7 @@ local function refreshInterface()
 	local active = false
 
 	for key, enabled in pairs(AutoFarm.toggles) do
-		if key ~= "AutoBank" and key ~= "DodgeAttacks" then
+		if key ~= "AutoBank" and key ~= "DodgeAttacks" and key ~= "DungeonStop" and not string.find(key, "^Webhook") then
 			active = active or enabled
 		end
 	end
@@ -7933,6 +8576,16 @@ local function refreshInterface()
 	window:SetStatus(active and session.mode or "Idle", active)
 	window:SetProfile(string.format("World %d · Rebirth %d", PlaceConfig.World, data.Rebirths or 0))
 	ui.feed:Set(activity)
+
+	if ui.dungeonCard and ui.dungeonCard:IsVisible() then
+		local floor = localPlayer:GetAttribute("DungeonFloor")
+
+		Library.setText(ui.dungeonFloor, dungeonRun() ~= nil and tostring(floor or 1) or "Not in a run")
+		Library.setText(ui.dungeonTokens, tostring(data.DungeonTokens or 0))
+		Library.setText(ui.dungeonBest, tostring(data.DungeonBest or 0))
+		Library.setText(ui.dungeonRuns, string.format("%d · +%d tokens", dungeon.runs, dungeon.banked))
+		Library.setText(ui.dungeonLast, dungeon.lastEnd)
+	end
 
 	local shown = false
 
@@ -8059,6 +8712,7 @@ local function createInterface()
 
 	local movement = farm:AddCard("Movement", 1)
 
+	movement:AddToggle("UseAbilities", "Use Card Abilities", "Casts your equipped cards' abilities at the nearest enemy whenever they are off cooldown.")
 	movement:AddToggle("DodgeAttacks", "Dodge Attacks", "Slides out of glowing enemy attack zones while farming.")
 	movement:AddSlider("targetDistance", "Distance from target", { MIN_TARGET_DISTANCE, 120 }, "studs", nil, nil, { ticks = { "4", "120" } })
 	movement:AddSlider("floatHeight", "Float height", { 0, 40 }, "studs", nil, nil, { ticks = { "0", "40" } })
@@ -8074,6 +8728,36 @@ local function createInterface()
 			packChoices[#packChoices + 1] = packId
 		end
 	end
+
+	local dungeonPage = window:AddPage("Dungeon", { icon = "gem", description = "Dungeon runs, the stop floor and the token shop." })
+	local runs = dungeonPage:AddCard("Dungeon farm", 1)
+
+	runs:AddToggle("DungeonFarm", "Dungeon Farm", "Queues on the portal pad, then clears every room and boss, floor after floor.")
+	runs:AddToggle("DungeonStop", "Stop at floor", "Leaves the run once this floor is cleared, so you keep what you banked.")
+	runs:AddSlider("dungeonStopFloor", "Stop after floor", { 1, 200 }, nil, nil, nil, {
+		showWhen = "DungeonStop",
+		input = true,
+		ticks = { "1", "200" },
+	})
+	runs:AddSegmented("dungeonAfter", "After stopping", DUNGEON_AFTER)
+	runs:AddNote("Every floor has 2 waves, and every 5th floor is a boss that banks your tokens. Stop on 5, 10, 15… so none are lost.", "lock")
+	runs:AddNote("The 15s queue timer is server-side and can't be skipped.", "lock")
+
+	local status = dungeonPage:AddCard("Run", 2)
+
+	ui.dungeonFloor = status:AddStat("Floor", Library.theme.gold)
+	ui.dungeonTokens = status:AddStat("Tokens", Library.theme.good)
+	ui.dungeonBest = status:AddStat("Best floor", Library.theme.soft)
+	ui.dungeonRuns = status:AddStat("Runs this session", Library.theme.soft)
+	ui.dungeonLast = status:AddStat("Last run", Library.theme.soft)
+	ui.dungeonCard = status
+
+	local dungeonShop = dungeonPage:AddCard("Dungeon shop", 2)
+
+	dungeonShop:AddToggle("AutoDungeonBuy", "Auto Buy", "Buys the picked potions and trinkets with dungeon tokens. Works from anywhere.")
+	dungeonShop:AddSlider("dungeonKeep", "Keep up to", { 1, 50 }, "each", nil, nil, { ticks = { "1", "50" } })
+	dungeonShop:AddChips(dungeonShopChoices(), { actions = true, label = "Select items" })
+	dungeonShop:AddNote("Items marked F10, F15 or F25 unlock at that best floor.", "lock")
 
 	local cards = window:AddPage("Cards", { icon = "star", description = "Packs, merging and card placement." })
 	local packs = cards:AddCard("Packs", 1)
@@ -8121,8 +8805,45 @@ local function createInterface()
 
 	upgrades:AddToggle("AutoRebirth", "Auto Rebirth", "Rebirths as soon as your level is high enough. Resets power.")
 
+	local alerts = window:AddPage("Webhook", { icon = "external-link", description = "Discord messages for pulls and dungeon runs." })
+	local hook = alerts:AddCard("Discord webhook", 1)
+
+	local urlBox = hook:AddInput("https://discord.com/api/webhooks/...")
+
+	urlBox.FocusLost:Connect(function()
+		AutoFarm.settings.webhookUrl = string.gsub(urlBox.Text, "%s", "")
+		urlBox.Text = AutoFarm.settings.webhookUrl
+	end)
+
+	hook:AddButton("Send test message", function()
+		if not validWebhook(AutoFarm.settings.webhookUrl) then
+			logActivity("Paste a webhook URL first", "dangerText")
+			return
+		end
+
+		queueWebhook({ title = "Webhook connected", description = "Pulls and dungeon runs will show up here.", color = WEBHOOK_DUNGEON_WON })
+		logActivity("Sent a test message to the webhook")
+	end, "ghost")
+	hook:AddNote("The URL is saved only in your local config file. Don't share configs that have it.", "lock")
+
+	local pulls = alerts:AddCard("Card pulls", 2)
+	local rarityChoices = {}
+
+	for _, rarity in ipairs(CardConfig.RarityOrder) do
+		rarityChoices[#rarityChoices + 1] = rarity
+	end
+
+	pulls:AddToggle("WebhookCards", "Send pulls", "Sends the cards you pull from packs the script opens, if their rarity is picked.")
+	pulls:AddToggle("WebhookPing", "Ping @everyone", "Adds an @everyone ping to pull messages.")
+	pulls:AddChips({ { name = "Rarities", key = "webhookRarities", choices = rarityChoices } }, { actions = true, label = "Select rarities" })
+
+	local runsHook = alerts:AddCard("Dungeon runs", 1)
+
+	runsHook:AddToggle("WebhookDungeon", "Send run results", "Sends the floor, tokens, kills and time when a dungeon run ends, however it ends.")
+
 	AutoFarm.window = window
 	window:Ready()
+	urlBox.Text = AutoFarm.settings.webhookUrl or ""
 end
 
 ---Initialize AutoFarm module.
@@ -8139,6 +8860,7 @@ function AutoFarm.init()
 	connections[#connections + 1] = Remotes.EnemyReward.OnClientEvent:Connect(function()
 		lastRewardAt = os.clock()
 	end)
+	connections[#connections + 1] = Remotes:WaitForChild("Dungeon").OnClientEvent:Connect(onDungeonEvent)
 	connections[#connections + 1] = replicatedStorage.EnemyPads.ChildAdded:Connect(function()
 		task.defer(buildCatalog)
 	end)
@@ -8149,6 +8871,8 @@ function AutoFarm.init()
 	spawnLoop("Cards", CARDS_INTERVAL, cardsStep)
 	spawnLoop("AntiAfk", ANTI_AFK_INTERVAL, antiAfkStep)
 	spawnLoop("Respawn", 1, respawnStep)
+	spawnLoop("Abilities", ABILITY_INTERVAL, abilityStep)
+	spawnLoop("Webhook", WEBHOOK_GAP, webhookStep)
 	logActivity(session.hopped and "Loaded after a server hop" or "Loaded")
 end
 
